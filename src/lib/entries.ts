@@ -20,6 +20,42 @@ export function sortEntries(entries: ArchiveEntry[]): ArchiveEntry[] {
   });
 }
 
+export type SortKey = "name" | "size" | "compressed" | "ratio";
+
+/**
+ * Trie les entrées : dossiers d'abord, puis selon la clé demandée
+ * (croissante ou décroissante). Le tri par nom utilise localeCompare "fr".
+ */
+export function sortEntriesBy(
+  entries: ArchiveEntry[],
+  key: SortKey,
+  asc: boolean,
+): ArchiveEntry[] {
+  const dirFactor = asc ? 1 : -1;
+  return [...entries].sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    let cmp: number;
+    switch (key) {
+      case "size":
+        cmp = a.size - b.size || a.path.localeCompare(b.path, "fr");
+        break;
+      case "compressed":
+        cmp = a.compressedSize - b.compressedSize || a.path.localeCompare(b.path, "fr");
+        break;
+      case "ratio":
+        cmp =
+          a.compressedSize / (a.size || 1) - b.compressedSize / (b.size || 1) ||
+          a.path.localeCompare(b.path, "fr");
+        break;
+      case "name":
+      default:
+        cmp = a.path.localeCompare(b.path, "fr");
+        break;
+    }
+    return cmp * dirFactor;
+  });
+}
+
 /**
  * Trie les chemins de dossiers parents implicites à partir des chemins d'entrées.
  */
