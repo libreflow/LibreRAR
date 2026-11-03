@@ -1,17 +1,34 @@
-import { useMemo, useState } from "react";
-import type { ArchiveEntry } from "../types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ArchiveEntry, ArchiveFormat } from "../types";
 import { compressionRatio, entryBaseName, formatBytes } from "../lib/format";
-import { filterEntries } from "../lib/entries";
+import { filterEntries, sortEntriesBy, type SortKey } from "../lib/entries";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  FileIcon,
+  FolderIcon,
+  LoaderIcon,
+  SquareCheckIcon,
+  SquareIcon,
+} from "./Icons";
 
 interface ArchiveViewProps {
   archiveName: string;
+  format: ArchiveFormat;
   entries: ArchiveEntry[];
   busy: boolean;
   onExtract: (password: string | null, selection: string[]) => void;
 }
 
+const FORMAT_LABELS: Record<ArchiveFormat, string> = {
+  zip: "ZIP",
+  rar: "RAR",
+  sevenz: "7Z",
+};
+
 export default function ArchiveView({
   archiveName,
+  format,
   entries,
   busy,
   onExtract,
@@ -19,8 +36,44 @@ export default function ArchiveView({
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [password, setPassword] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortAsc, setSortAsc] = useState(true);
+  const searchRef = useRef<HTMLInputElement>(null);
 
-  const visible = useMemo(() => filterEntries(entries, query), [entries, query]);
+  // Raccourci « / » : focus sur le filtre (hors champ de saisie).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "/") return;
+      const tag = document.activeElement?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      event.preventDefault();
+      searchRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const visible = useMemo(
+    () => sortEntriesBy(filterEntries(entries, query), sortKey, sortAsc),
+    [entries, query, sortKey, sortAsc],
+  );
+
+  const sortBy = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortAsc((prev) => !prev);
+    } else {
+      setSortKey(key);
+      setSortAsc(true);
+    }
+  };
+
+  const ariaSort = (key: SortKey) =>
+    sortKey !== key ? "none" : sortAsc ? "ascending" : "descending";
+
+  const sortIndicator = (key: SortKey) => {
+    if (sortKey !== key) return null;
+    return sortAsc ? <ArrowUpIcon /> : <ArrowDownIcon />;
+  };
 
   const toggle = (path: string) => {
     setSelected((prev) => {
@@ -70,12 +123,16 @@ export default function ArchiveView({
   return (
     <section className="archive-view">
       <div className="archive-toolbar">
+        <span className={`format-badge format-${format}`}>
+          {FORMAT_LABELS[format]}
+        </span>
         <span className="archive-name" title={archiveName}>
           {archiveName}
         </span>
         <input
+          ref={searchRef}
           type="search"
-          placeholder="Filtrer…"
+          placeholder="Filtrer… (/)"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Filtrer les entrées"
@@ -92,46 +149,93 @@ export default function ArchiveView({
           disabled={busy}
           onClick={() => onExtract(password.length > 0 ? password : null, selection)}
         >
-          {busy
-            ? "…"
-            : selection.length > 0
-              ? `Extraire la sélection (${selection.length})`
-              : "Tout extraire…"}
+          {busy ? (
+            <>
+              <LoaderIcon className="spin" /> Extraction…
+            </>
+          ) : selection.length > 0 ? (
+            `Extraire la sélection (${selection.length})`
+          ) : (
+            "Tout extraire…"
+          )}
         </button>
       </div>
 
-      <div className="entry-table" role="table">
+      <div className="entry-table" role="table" aria-label={`Contenu de ${archiveName}`}>
         <div className="entry-row entry-head" role="row">
-          <button
-            className="checkbox"
-            onClick={toggleAllVisible}
-            aria-label="Tout sélectionner"
-          >
-            {visible.every((e) => selected.has(e.path)) && visible.length > 0
-              ? "☑"
-              : "☐"}
-          </button>
-          <span>Nom</span>
-          <span>Taille</span>
-          <span>Compressé</span>
-          <span>Taux</span>
+          <span role="columnheader">
+            <button
+              type="button"
+              className="checkbox"
+              role="checkbox"
+              aria-checked={visible.length > 0 && visible.every((e) => selected.has(e.path))}
+              onClick={toggleAllVisible}
+              aria-label="Tout sélectionner"
+            >
+              {visible.length > 0 && visible.every((e) => selected.has(e.path)) ? (
+                <SquareCheckIcon />
+              ) : (
+                <SquareIcon />
+              )}
+            </button>
+          </span>
+          <span role="columnheader" aria-sort={ariaSort("name")}>
+            <button type="button" className="th-button" onClick={() => sortBy("name")}>
+              Nom {sortIndicator("name")}
+            </button>
+          </span>
+          <span className="cell-num" role="columnheader" aria-sort={ariaSort("size")}>
+            <button type="button" className="th-button" onClick={() => sortBy("size")}>
+              Taille {sortIndicator("size")}
+            </button>
+          </span>
+          <span className="cell-num" role="columnheader" aria-sort={ariaSort("compressed")}>
+            <button type="button" className="th-button" onClick={() => sortBy("compressed")}>
+              Compressé {sortIndicator("compressed")}
+            </button>
+          </span>
+          <span className="cell-num" role="columnheader" aria-sort={ariaSort("ratio")}>
+            <button type="button" className="th-button" onClick={() => sortBy("ratio")}>
+              Taux {sortIndicator("ratio")}
+            </button>
+          </span>
         </div>
-        {visible.map((entry) => (
+        {visible.map((entry, index) => (
           <div
             key={entry.path}
             className="entry-row"
             role="row"
             onClick={() => toggle(entry.path)}
+            style={{ animationDelay: `${Math.min(index * 14, 280)}ms` }}
           >
-            <span className="checkbox">
-              {selected.has(entry.path) ? "☑" : "☐"}
+            <span role="cell">
+              <button
+                type="button"
+                className="checkbox"
+                role="checkbox"
+                aria-checked={selected.has(entry.path)}
+                aria-label={`Sélectionner ${entryBaseName(entry.path)}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggle(entry.path);
+                }}
+              >
+                {selected.has(entry.path) ? <SquareCheckIcon /> : <SquareIcon />}
+              </button>
             </span>
-            <span className="entry-name">
-              {entry.isDir ? "📁" : "📄"} {entryBaseName(entry.path)}
+            <span className="entry-name" role="cell">
+              {entry.isDir ? <FolderIcon /> : <FileIcon />}{" "}
+              {entryBaseName(entry.path)}
             </span>
-            <span>{entry.isDir ? "—" : formatBytes(entry.size)}</span>
-            <span>{entry.isDir ? "—" : formatBytes(entry.compressedSize)}</span>
-            <span>
+            <span className="cell-num" role="cell">
+              {entry.isDir ? "—" : formatBytes(entry.size)}
+            </span>
+            <span className="cell-num" role="cell">
+              {entry.isDir || entry.compressedSize === 0
+                ? "—"
+                : formatBytes(entry.compressedSize)}
+            </span>
+            <span className="cell-num" role="cell">
               {entry.isDir ? "—" : compressionRatio(entry.size, entry.compressedSize)}
             </span>
           </div>

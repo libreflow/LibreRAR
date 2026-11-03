@@ -1,10 +1,13 @@
 import { fileNameOf } from "../lib/format";
+import { FileIcon, LoaderIcon } from "./Icons";
 
 interface CreatePanelProps {
   busy: boolean;
   sources: string[];
   onCancel: () => void;
   onCreate: () => void;
+  onAddFiles: () => void;
+  onAddDir: () => void;
 }
 
 export default function CreatePanel({
@@ -12,6 +15,8 @@ export default function CreatePanel({
   sources,
   onCancel,
   onCreate,
+  onAddFiles,
+  onAddDir,
 }: CreatePanelProps) {
   return (
     <section className="create-panel">
@@ -23,7 +28,7 @@ export default function CreatePanel({
       <ul className="create-list">
         {sources.map((source) => (
           <li key={source} title={source}>
-            📄 {fileNameOf(source)}
+            <FileIcon className="list-icon" /> {fileNameOf(source)}
           </li>
         ))}
       </ul>
@@ -31,8 +36,20 @@ export default function CreatePanel({
         <button className="ghost" onClick={onCancel} disabled={busy}>
           Annuler
         </button>
+        <button onClick={onAddFiles} disabled={busy}>
+          Ajouter des fichiers…
+        </button>
+        <button onClick={onAddDir} disabled={busy}>
+          Ajouter un dossier…
+        </button>
         <button className="primary" onClick={onCreate} disabled={busy || sources.length === 0}>
-          {busy ? "Compression…" : "Choisir l'emplacement…"}
+          {busy ? (
+            <>
+              <LoaderIcon className="spin" /> Compression…
+            </>
+          ) : (
+            "Choisir l'emplacement…"
+          )}
         </button>
       </div>
     </section>
