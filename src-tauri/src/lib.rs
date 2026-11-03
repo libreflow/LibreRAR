@@ -3,9 +3,11 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
+    sync::Mutex,
 };
 
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 use zip::{result::ZipError, write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 #[derive(Serialize)]
@@ -17,7 +19,7 @@ pub struct ArchiveEntry {
     pub is_dir: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationResult {
     pub files: u64,
@@ -25,6 +27,63 @@ pub struct OperationResult {
 }
 
 type CommandResult<T> = Result<T, String>;
+
+const OP_CANCELLED: &str = "Opération annulée.";
+
+/// Progression d'une opération, émise vers le frontend (événement
+/// `operation-progress`).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProgressPayload {
+    id: String,
+    done: u64,
+    total: u64,
+    current: String,
+}
+
+/// Jetons d'annulation des opérations en cours.
+#[derive(Default)]
+struct CancelTokens(Mutex<HashSet<String>>);
+
+/// Contexte d'opération : vérifie l'annulation, émet la progression.
+/// `app`/`tokens` sont absents dans les tests unitaires (tout devient no-op).
+struct OpContext<'a> {
+    app: Option<&'a AppHandle>,
+    tokens: Option<&'a CancelTokens>,
+    id: &'a str,
+}
+
+impl OpContext<'_> {
+    fn cancelled(&self) -> bool {
+        match self.tokens {
+            Some(tokens) => tokens.0.lock().unwrap().contains(self.id),
+            None => false,
+        }
+    }
+
+    /// Erre si l'utilisateur a demandé l'annulation de l'opération.
+    fn check(&self) -> CommandResult<()> {
+        if self.cancelled() {
+            Err(OP_CANCELLED.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn progress(&self, done: u64, total: u64, current: &str) {
+        if let Some(app) = self.app {
+            let _ = app.emit(
+                "operation-progress",
+                ProgressPayload {
+                    id: self.id.to_string(),
+                    done,
+                    total,
+                    current: current.to_string(),
+                },
+            );
+        }
+    }
+}
 
 fn to_err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -93,8 +152,11 @@ fn list_zip(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
     Ok(entries)
 }
 
-fn list_rar(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
-    let archive = unrar::Archive::new(path);
+fn list_rar(path: &Path, password: Option<&str>) -> CommandResult<Vec<ArchiveEntry>> {
+    let archive = match password {
+        Some(password) => unrar::Archive::with_password(path, password),
+        None => unrar::Archive::new(path),
+    };
     let mut open = archive.open_for_listing().map_err(to_err)?;
     let mut entries = Vec::new();
     loop {
@@ -119,9 +181,12 @@ fn list_rar(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
     }
 }
 
-fn list_sevenz(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
-    let reader = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
-        .map_err(to_err)?;
+fn list_sevenz(path: &Path, password: Option<&str>) -> CommandResult<Vec<ArchiveEntry>> {
+    let password = match password {
+        Some(p) => sevenz_rust::Password::from(p),
+        None => sevenz_rust::Password::empty(),
+    };
+    let reader = sevenz_rust::SevenZReader::open(path, password).map_err(to_err)?;
     let archive = reader.archive();
     Ok(archive
         .files
@@ -136,19 +201,26 @@ fn list_sevenz(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
 }
 
 #[tauri::command]
-async fn list_archive(path: String) -> CommandResult<Vec<ArchiveEntry>> {
+async fn list_archive(
+    path: String,
+    password: Option<String>,
+) -> CommandResult<Vec<ArchiveEntry>> {
     let path = PathBuf::from(path);
-    list_archive_inner(&path)
+    let password = normalize_password(&password);
+    list_archive_inner(&path, password)
 }
 
-fn list_archive_inner(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
+fn list_archive_inner(
+    path: &Path,
+    password: Option<&str>,
+) -> CommandResult<Vec<ArchiveEntry>> {
     if !path.is_file() {
         return Err(format!("Fichier introuvable : {}", path.display()));
     }
     match detect_format(path)? {
         "zip" => list_zip(path),
-        "rar" => list_rar(path),
-        _ => list_sevenz(path),
+        "rar" => list_rar(path, password),
+        _ => list_sevenz(path, password),
     }
 }
 
@@ -157,6 +229,7 @@ fn list_archive_inner(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
 // ---------------------------------------------------------------------------
 
 fn extract_zip(
+    ctx: &OpContext,
     path: &Path,
     dest_dir: &Path,
     password: Option<&str>,
@@ -164,9 +237,12 @@ fn extract_zip(
 ) -> CommandResult<OperationResult> {
     let file = File::open(path).map_err(to_err)?;
     let mut archive = ZipArchive::new(file).map_err(to_err)?;
+    let total = archive.len() as u64;
     let mut files = 0;
     let mut bytes = 0;
+    let mut done = 0;
     for index in 0..archive.len() {
+        ctx.check()?;
         // by_index_raw permet d'inspecter l'entrée avant décompression.
         let header = archive.by_index_raw(index).map_err(to_err)?;
         let name = header.name().replace('\\', "/");
@@ -174,6 +250,9 @@ fn extract_zip(
         let size = header.size();
         let encrypted = header.encrypted();
         drop(header);
+
+        done += 1;
+        ctx.progress(done, total, &name);
 
         if let Some(selected) = selection {
             if !selected.contains(&name) {
@@ -207,11 +286,14 @@ fn extract_zip(
 }
 
 fn extract_rar(
+    ctx: &OpContext,
     path: &Path,
     dest_dir: &Path,
     password: Option<&str>,
     selection: Option<&HashSet<String>>,
 ) -> CommandResult<OperationResult> {
+    // Compte d'abord les entrées pour avoir un total de progression.
+    let total = list_rar(path, password)?.len() as u64;
     let archive = match password {
         Some(password) => unrar::Archive::with_password(path, password),
         None => unrar::Archive::new(path),
@@ -219,7 +301,9 @@ fn extract_rar(
     let mut open = archive.open_for_processing().map_err(to_err)?;
     let mut files = 0;
     let mut bytes = 0;
+    let mut done = 0;
     loop {
+        ctx.check()?;
         let before_file = match open.read_header().map_err(to_err)? {
             Some(next) => next,
             None => return Ok(OperationResult { files, bytes }),
@@ -228,6 +312,8 @@ fn extract_rar(
         let name = header.filename.to_string_lossy().replace('\\', "/");
         let is_dir = header.is_directory();
         let size = header.unpacked_size;
+        done += 1;
+        ctx.progress(done, total, &name);
 
         let wanted = is_dir
             || match selection {
@@ -255,6 +341,7 @@ fn extract_rar(
 }
 
 fn extract_sevenz(
+    ctx: &OpContext,
     path: &Path,
     dest_dir: &Path,
     password: Option<&str>,
@@ -265,14 +352,19 @@ fn extract_sevenz(
         None => sevenz_rust::Password::empty(),
     };
     let mut reader = sevenz_rust::SevenZReader::open(path, password).map_err(to_err)?;
+    let total = reader.archive().files.len() as u64;
     let mut result = OperationResult { files: 0, bytes: 0 };
     let mut failure: Option<String> = None;
+    let mut done = 0;
     reader
         .for_each_entries(|entry, entry_reader| {
-            let step = |result: &mut OperationResult,
+            let mut step = |result: &mut OperationResult,
                         entry: &sevenz_rust::SevenZArchiveEntry,
                         entry_reader: &mut dyn Read|
              -> CommandResult<()> {
+                ctx.check()?;
+                done += 1;
+                ctx.progress(done, total, &entry.name);
                 if entry.is_directory() {
                     return Ok(());
                 }
@@ -313,6 +405,9 @@ fn extract_sevenz(
 
 #[tauri::command]
 async fn extract_archive(
+    app: AppHandle,
+    tokens: tauri::State<'_, CancelTokens>,
+    id: String,
     path: String,
     dest_dir: String,
     password: Option<String>,
@@ -323,14 +418,28 @@ async fn extract_archive(
     let password = normalize_password(&password);
     let selection: Option<HashSet<String>> =
         entries.map(|entries| entries.into_iter().collect());
-    extract_archive_inner(&path, &dest_dir, password, selection)
+    let result = extract_archive_inner(
+        Some(&app),
+        Some(&tokens),
+        &id,
+        &path,
+        &dest_dir,
+        password,
+        selection.as_ref(),
+    );
+    // Consomme le jeton, que l'opération réussisse ou échoue.
+    tokens.0.lock().unwrap().remove(&id);
+    result
 }
 
 fn extract_archive_inner(
+    app: Option<&AppHandle>,
+    tokens: Option<&CancelTokens>,
+    id: &str,
     path: &Path,
     dest_dir: &Path,
     password: Option<&str>,
-    selection: Option<HashSet<String>>,
+    selection: Option<&HashSet<String>>,
 ) -> CommandResult<OperationResult> {
     if !path.is_file() {
         return Err(format!("Fichier introuvable : {}", path.display()));
@@ -338,24 +447,65 @@ fn extract_archive_inner(
     if !dest_dir.is_dir() {
         return Err(format!("Dossier de destination introuvable : {}", dest_dir.display()));
     }
+    let ctx = OpContext { app, tokens, id };
     match detect_format(path)? {
-        "zip" => extract_zip(path, dest_dir, password, selection.as_ref()),
-        "rar" => extract_rar(path, dest_dir, password, selection.as_ref()),
-        _ => extract_sevenz(path, dest_dir, password, selection.as_ref()),
+        "zip" => extract_zip(&ctx, path, dest_dir, password, selection),
+        "rar" => extract_rar(&ctx, path, dest_dir, password, selection),
+        _ => extract_sevenz(&ctx, path, dest_dir, password, selection),
     }
+}
+
+/// Demande l'annulation de l'opération identifiée par `id`.
+#[tauri::command]
+async fn cancel_operation(tokens: tauri::State<'_, CancelTokens>, id: String) -> CommandResult<()> {
+    tokens.0.lock().unwrap().insert(id);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Création d'archives ZIP
 // ---------------------------------------------------------------------------
 
+/// Compte les fichiers (récursivement) que vont produire les sources.
+fn count_sources(sources: &[PathBuf]) -> u64 {
+    fn count_dir(dir: &Path) -> u64 {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    count_dir(&path)
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+    sources
+        .iter()
+        .map(|source| {
+            if source.is_dir() {
+                count_dir(source)
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
 fn add_file_to_zip<W: Write + io::Seek>(
+    ctx: &OpContext,
+    total: u64,
     zip: &mut ZipWriter<W>,
     name: &str,
     path: &Path,
     options: SimpleFileOptions,
     result: &mut OperationResult,
 ) -> CommandResult<()> {
+    ctx.check()?;
     let mut file = File::open(path).map_err(to_err)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).map_err(to_err)?;
@@ -363,10 +513,13 @@ fn add_file_to_zip<W: Write + io::Seek>(
     zip.write_all(&data).map_err(to_err)?;
     result.files += 1;
     result.bytes += data.len() as u64;
+    ctx.progress(result.files, total, name);
     Ok(())
 }
 
 fn add_dir_to_zip<W: Write + io::Seek>(
+    ctx: &OpContext,
+    total: u64,
     zip: &mut ZipWriter<W>,
     prefix: &str,
     dir: &Path,
@@ -382,9 +535,9 @@ fn add_dir_to_zip<W: Write + io::Seek>(
         if path.is_dir() {
             zip.add_directory(&zip_name, options)
                 .map_err(|e| map_zip_err(e, &zip_name))?;
-            add_dir_to_zip(zip, &format!("{zip_name}/"), &path, options, result)?;
+            add_dir_to_zip(ctx, total, zip, &format!("{zip_name}/"), &path, options, result)?;
         } else {
-            add_file_to_zip(zip, &zip_name, &path, options, result)?;
+            add_file_to_zip(ctx, total, zip, &zip_name, &path, options, result)?;
         }
     }
     Ok(())
@@ -397,27 +550,15 @@ fn map_zip_err(error: ZipError, name: &str) -> String {
     }
 }
 
-#[tauri::command]
-async fn create_zip(dest: String, sources: Vec<String>) -> CommandResult<OperationResult> {
-    let dest = PathBuf::from(&dest);
-    let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
-    create_zip_inner(&dest, &sources)
-}
-
-fn create_zip_inner(
-    dest: &Path,
+/// Écrit toutes les sources dans le writer ZIP.
+fn write_sources<W: Write + io::Seek>(
+    ctx: &OpContext,
+    total: u64,
+    zip: &mut ZipWriter<W>,
     sources: &[PathBuf],
-) -> CommandResult<OperationResult> {
-    if sources.is_empty() {
-        return Err("Aucun fichier source fourni.".into());
-    }
-    if dest.exists() {
-        return Err("Le fichier de destination existe déjà.".into());
-    }
-    let mut result = OperationResult { files: 0, bytes: 0 };
-    let file = File::create(dest).map_err(to_err)?;
-    let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    options: SimpleFileOptions,
+    result: &mut OperationResult,
+) -> CommandResult<()> {
     for source in sources {
         let source = source.as_path();
         let name = source
@@ -427,12 +568,58 @@ fn create_zip_inner(
             .to_string();
         if source.is_dir() {
             zip.add_directory(&name, options).map_err(to_err)?;
-            add_dir_to_zip(&mut zip, &format!("{name}/"), source, options, &mut result)?;
+            add_dir_to_zip(ctx, total, zip, &format!("{name}/"), source, options, result)?;
         } else {
-            add_file_to_zip(&mut zip, &name, source, options, &mut result)?;
+            add_file_to_zip(ctx, total, zip, &name, source, options, result)?;
         }
     }
-    zip.finish().map_err(to_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_zip(
+    app: AppHandle,
+    tokens: tauri::State<'_, CancelTokens>,
+    id: String,
+    dest: String,
+    sources: Vec<String>,
+) -> CommandResult<OperationResult> {
+    let dest = PathBuf::from(&dest);
+    let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+    let result = create_zip_inner(Some(&app), Some(&tokens), &id, &dest, &sources);
+    // Consomme le jeton, que l'opération réussisse ou échoue.
+    tokens.0.lock().unwrap().remove(&id);
+    result
+}
+
+fn create_zip_inner(
+    app: Option<&AppHandle>,
+    tokens: Option<&CancelTokens>,
+    id: &str,
+    dest: &Path,
+    sources: &[PathBuf],
+) -> CommandResult<OperationResult> {
+    if sources.is_empty() {
+        return Err("Aucun fichier source fourni.".into());
+    }
+    if dest.exists() {
+        return Err("Le fichier de destination existe déjà.".into());
+    }
+    let ctx = OpContext { app, tokens, id };
+    let total = count_sources(sources);
+    let mut result = OperationResult { files: 0, bytes: 0 };
+    let file = File::create(dest).map_err(to_err)?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    // `finish` consomme le writer : la chaîne ci-dessous garantit sa
+    // destruction (donc la fermeture du fichier) avant le nettoyage.
+    let outcome = write_sources(&ctx, total, &mut zip, sources, options, &mut result)
+        .and_then(|_| zip.finish().map_err(to_err));
+    if let Err(error) = outcome {
+        // Ne laisse pas d'archive partielle sur disque.
+        let _ = fs::remove_file(dest);
+        return Err(error);
+    }
     Ok(result)
 }
 
@@ -444,10 +631,13 @@ fn create_zip_inner(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .manage(CancelTokens::default())
         .invoke_handler(tauri::generate_handler![
             list_archive,
             extract_archive,
-            create_zip
+            create_zip,
+            cancel_operation
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de LibreRAR");
@@ -499,10 +689,10 @@ mod tests {
         write(&source_dir.join("sous-dossier/b.txt"), "contenu B");
         let archive = root.join("test.zip");
 
-        let created = create_zip_inner(&archive, &[source_dir.clone()]).unwrap();
+        let created = create_zip_inner(None, None, "", &archive, &[source_dir.clone()]).unwrap();
         assert_eq!(created.files, 2);
 
-        let entries = list_archive_inner(&archive).unwrap();
+        let entries = list_archive_inner(&archive, None).unwrap();
         let names: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
         assert!(names.contains(&"sources/a.txt".to_string()));
         assert!(names.contains(&"sources/sous-dossier/b.txt".to_string()));
@@ -510,7 +700,7 @@ mod tests {
         // Extraction complète
         let out = root.join("out");
         fs::create_dir_all(&out).unwrap();
-        let extracted = extract_archive_inner(&archive, &out, None, None).unwrap();
+        let extracted = extract_archive_inner(None, None, "", &archive, &out, None, None).unwrap();
         assert_eq!(extracted.files, 2);
         assert_eq!(
             fs::read_to_string(out.join("sources/a.txt")).unwrap(),
@@ -523,7 +713,7 @@ mod tests {
         let selection: HashSet<String> = ["sources/sous-dossier/b.txt".to_string()]
             .into_iter()
             .collect();
-        extract_archive_inner(&archive, &out2, None, Some(selection)).unwrap();
+        extract_archive_inner(None, None, "", &archive, &out2, None, Some(&selection)).unwrap();
         assert!(out2.join("sources/sous-dossier/b.txt").is_file());
         assert!(!out2.join("sources/a.txt").exists());
 
@@ -540,14 +730,85 @@ mod tests {
 
         sevenz_rust::compress_to_path(&source_dir, &archive).unwrap();
 
-        let entries = list_archive_inner(&archive).unwrap();
+        let entries = list_archive_inner(&archive, None).unwrap();
         assert!(entries.iter().any(|e| e.path == "a.txt"));
 
         let out = root.join("out");
         fs::create_dir_all(&out).unwrap();
-        let extracted = extract_archive_inner(&archive, &out, None, None).unwrap();
+        let extracted = extract_archive_inner(None, None, "", &archive, &out, None, None).unwrap();
         assert_eq!(extracted.files, 2);
-        assert_eq!(fs::read_to_string(out.join("a.txt")).unwrap(), "contenu A");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn annulation_arrete_lextraction() {
+        let root = temp_root("cancel");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        write(&source_dir.join("b.txt"), "contenu B");
+        let archive = root.join("test.zip");
+        create_zip_inner(None, None, "", &archive, &[source_dir]).unwrap();
+
+        let tokens = CancelTokens::default();
+        tokens.0.lock().unwrap().insert("op-1".into());
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let error = extract_archive_inner(None, Some(&tokens), "op-1", &archive, &out, None, None)
+            .unwrap_err();
+        assert!(error.contains("annulée"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn creation_annulee_ne_laisse_pas_darchive_partielle() {
+        let root = temp_root("cancel-create");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        let archive = root.join("partiel.zip");
+
+        let tokens = CancelTokens::default();
+        tokens.0.lock().unwrap().insert("op-2".into());
+        let error =
+            create_zip_inner(None, Some(&tokens), "op-2", &archive, &[source_dir]).unwrap_err();
+        assert!(error.contains("annulée"));
+        assert!(!archive.exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn roundtrip_sevenz_chiffre() {
+        let root = temp_root("7z-crypt");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu secret");
+        let archive = root.join("secret.7z");
+        let password = "mot-de-passe";
+
+        sevenz_rust::compress_to_path_encrypted(
+            &source_dir,
+            &archive,
+            sevenz_rust::Password::from(password),
+        )
+        .unwrap();
+
+        // Le listing accepte le mot de passe.
+        let entries = list_archive_inner(&archive, Some(password)).unwrap();
+        assert!(entries.iter().any(|e| e.path == "a.txt"));
+
+        // Extraction : sans mot de passe ça échoue, avec le bon ça réussit.
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        assert!(extract_archive_inner(None, None, "", &archive, &out, None, None).is_err());
+
+        let out2 = root.join("out2");
+        fs::create_dir_all(&out2).unwrap();
+        let extracted = extract_archive_inner(None, None, "", &archive, &out2, Some(password), None).unwrap();
+        assert_eq!(extracted.files, 1);
+        assert_eq!(
+            fs::read_to_string(out2.join("a.txt")).unwrap(),
+            "contenu secret"
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }
