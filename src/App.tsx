@@ -7,6 +7,7 @@ import type { ArchiveEntry, ArchiveFormat, OperationResult, Status } from "./typ
 import { fileNameOf, formatBytes } from "./lib/format";
 import { sortEntries, implicitDirectories } from "./lib/entries";
 import {
+  asAppError,
   cancelOperation,
   createZip,
   detectFormat,
@@ -73,8 +74,11 @@ export default function App() {
   const [balatroPraise, setBalatroPraise] = useState("EXCELLENT !");
   // Mode Balatro complet (thème animé), basculé par la séquence « JIMBO ».
   const [balatroMode, setBalatroMode] = useState(false);
-  // Opérations longues : progression (barre) et annulation.
+  // Opérations longues : progression (barre) et annulation. `cancellable`
+  // distingue les opérations annulables (extraction, création) du listing,
+  // qui ne consulte pas les jetons d'annulation.
   const [progress, setProgress] = useState<OperationProgress | null>(null);
+  const [cancellable, setCancellable] = useState(false);
   const [extractDest, setExtractDest] = useState<string | null>(null);
   const opIdRef = useRef("");
 
@@ -90,11 +94,12 @@ export default function App() {
     };
   }, []);
 
-  /** Démarre une opération : nouvel identifiant d'annulation. */
+  /** Démarre une opération annulable : nouvel identifiant d'annulation. */
   const beginOperation = () => {
     const id = crypto.randomUUID();
     opIdRef.current = id;
     setProgress(null);
+    setCancellable(true);
     return id;
   };
 
@@ -173,12 +178,16 @@ export default function App() {
         message: `${entries.filter((e) => !e.isDir).length} fichier(s) — ${name}`,
       });
     } catch (error) {
-      // Mot de passe probablement requis : proposer une nouvelle tentative.
-      setPendingPath(path);
+      const appError = asAppError(error);
       setStatus({
         kind: "error",
-        message: `Impossible de lire l'archive : ${String(error)}`,
+        message: `Impossible de lire l'archive : ${appError.message}`,
       });
+      // Le prompt de mot de passe n'apparaît que si le backend signale
+      // un mot de passe manquant/incorrect (pas pour un fichier corrompu).
+      if (appError.kind === "passwordRequired") {
+        setPendingPath(path);
+      }
     } finally {
       setBusy(false);
     }
@@ -192,13 +201,23 @@ export default function App() {
   }, [openArchive]);
 
   // Glisser-déposer d'une archive sur la fenêtre (Tauri uniquement).
+  // Seule la première archive est ouverte.
   useEffect(() => {
     if (!isTauri()) return;
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === "drop") {
-        const path = event.payload.paths[0];
-        if (path) void openArchive(path);
-      }
+      if (event.payload.type !== "drop") return;
+      const paths = event.payload.paths;
+      const path = paths[0];
+      if (!path) return;
+      void (async () => {
+        await openArchive(path);
+        if (paths.length > 1) {
+          setStatus({
+            kind: "info",
+            message: `${paths.length} éléments déposés — seule « ${fileNameOf(path)} » a été ouverte.`,
+          });
+        }
+      })();
     });
     return () => {
       void unlisten.then((fn) => fn());
@@ -227,17 +246,19 @@ export default function App() {
         setLastResult(result);
         setExtractDest(destDir);
       } catch (error) {
-        if (String(error).includes("annulée")) {
+        const appError = asAppError(error);
+        if (appError.kind === "cancelled") {
           setStatus({ kind: "info", message: "Extraction annulée." });
         } else {
           setStatus({
             kind: "error",
-            message: `Échec de l'extraction : ${String(error)}`,
+            message: `Échec de l'extraction : ${appError.message}`,
           });
         }
       } finally {
         setBusy(false);
         setProgress(null);
+        setCancellable(false);
       }
     },
     [archive],
@@ -258,17 +279,19 @@ export default function App() {
         setCreating(false);
         await openArchive(dest);
       } catch (error) {
-        if (String(error).includes("annulée")) {
+        const appError = asAppError(error);
+        if (appError.kind === "cancelled") {
           setStatus({ kind: "info", message: "Création annulée." });
         } else {
           setStatus({
             kind: "error",
-            message: `Échec de la création : ${String(error)}`,
+            message: `Échec de la création : ${appError.message}`,
           });
         }
       } finally {
         setBusy(false);
         setProgress(null);
+        setCancellable(false);
       }
     },
     [openArchive],
@@ -350,7 +373,14 @@ export default function App() {
     let buffer = "";
     const onKeyDown = (event: KeyboardEvent) => {
       const tag = document.activeElement?.tagName;
-      if (event.key.length !== 1 || tag === "INPUT" || tag === "TEXTAREA") {
+      if (
+        event.key.length !== 1 ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.metaKey ||
+        tag === "INPUT" ||
+        tag === "TEXTAREA"
+      ) {
         buffer = "";
         return;
       }
@@ -382,7 +412,7 @@ export default function App() {
           )}
         </div>
       )}
-      {busy && (
+      {busy && cancellable && (
         <button
           className="cancel-button"
           onClick={() => void cancelOperation(opIdRef.current)}

@@ -9,6 +9,37 @@ export interface OperationProgress {
   current: string;
 }
 
+/** Erreur structurée renvoyée par les commandes Rust (`{ kind, message }`). */
+export interface AppError {
+  kind: "cancelled" | "passwordRequired" | "failed";
+  message: string;
+}
+
+/**
+ * Normalise une erreur IPC : les commandes Rust renvoient une `AppError`
+ * sérialisée ; tout le reste (interruption IPC, chaîne brute) est
+ * traité comme un échec générique.
+ */
+export function asAppError(error: unknown): AppError {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "kind" in error &&
+    "message" in error &&
+    typeof (error as AppError).message === "string"
+  ) {
+    const { kind } = error as { kind: unknown };
+    if (
+      kind === "cancelled" ||
+      kind === "passwordRequired" ||
+      kind === "failed"
+    ) {
+      return error as AppError;
+    }
+  }
+  return { kind: "failed", message: String(error) };
+}
+
 export function detectFormat(fileName: string): ArchiveFormat | null {
   const lower = fileName.toLowerCase();
   if (lower.endsWith(".zip") || lower.endsWith(".jar")) return "zip";

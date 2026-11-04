@@ -102,8 +102,9 @@ export default function ArchiveView({
     });
   };
 
+  // La sélection inclut les dossiers : le backend extrait alors leur contenu.
   const selection = useMemo(
-    () => entries.filter((e) => selected.has(e.path) && !e.isDir).map((e) => e.path),
+    () => entries.filter((e) => selected.has(e.path)).map((e) => e.path),
     [entries, selected],
   );
 
@@ -247,7 +248,9 @@ export default function ArchiveView({
 
       <div className="archive-summary">
         {totals.files} fichier(s) · {formatBytes(totals.size)} →{" "}
-        {formatBytes(totals.compressed)} · {entries.length} entrée(s)
+        {/* RAR : tailles compressées non exposées par le backend. */}
+        {totals.compressed > 0 ? formatBytes(totals.compressed) : "—"} ·{" "}
+        {entries.length} entrée(s)
       </div>
     </section>
   );
