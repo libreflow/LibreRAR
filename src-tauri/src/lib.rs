@@ -3,7 +3,11 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread,
 };
 
 use serde::Serialize;
@@ -324,7 +328,7 @@ fn list_zip(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
     let mut entries = Vec::with_capacity(archive.len() as usize);
     for index in 0..archive.len() {
         let entry = archive.by_index_raw(index).map_err(zip_err)?;
-        let path = entry.name().replace('\\', "/");
+        let path = entry.name().map_err(zip_err)?.replace('\\', "/");
         let is_dir = entry.is_dir() || path.ends_with('/');
         entries.push(ArchiveEntry {
             path: if is_dir {
@@ -449,7 +453,7 @@ fn extract_zip(
         ctx.check()?;
         // by_index_raw permet d'inspecter l'entrée avant décompression.
         let header = archive.by_index_raw(index).map_err(zip_err)?;
-        let name = header.name().replace('\\', "/");
+        let name = header.name().map_err(zip_err)?.replace('\\', "/");
         let is_dir = header.is_dir() || name.ends_with('/');
         let size = header.size();
         let encrypted = header.encrypted();
@@ -713,34 +717,103 @@ async fn cancel_operation(
 // Création d'archives ZIP
 // ---------------------------------------------------------------------------
 
-/// Compte les fichiers (récursivement) que vont produire les sources.
-fn count_sources(sources: &[PathBuf]) -> u64 {
-    fn count_dir(dir: &Path) -> u64 {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return 0;
-        };
-        entries
-            .filter_map(Result::ok)
-            .map(|entry| {
-                let path = entry.path();
-                if path.is_dir() {
-                    count_dir(&path)
-                } else {
-                    1
-                }
-            })
-            .sum()
+/// Taille au-delà de laquelle un fichier est compressé en flux séquentiel
+/// plutôt que dans le pool : le pool tamponne chaque entrée compressée en
+/// mémoire, ce seuil borne donc la mémoire consommée (workers + files
+/// d'attente).
+const PARALLEL_MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Nombre de threads de compression. Au-delà de quelques cœurs le disque
+/// devient le facteur limitant.
+fn worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(8)
+}
+
+/// Message d'un worker : fichier prêt à être ajouté, ou erreur.
+enum CompressedFile {
+    Prepared {
+        name: String,
+        bytes: u64,
+        file: zip::write::PreparedZipFile,
+    },
+    Failed(CommandError),
+}
+
+/// Compresse un fichier hors ligne dans un `ZipFileBuilder` : le CRC et les
+/// tailles sont calculés au passage, l'entrée peut ensuite être ajoutée
+/// telle quelle à l'archive.
+fn compress_one(
+    ctx: &OpContext,
+    stop: &AtomicBool,
+    name: &str,
+    path: &Path,
+    options: SimpleFileOptions,
+) -> CommandResult<(u64, zip::write::PreparedZipFile)> {
+    ctx.check()?;
+    let mut file = File::open(path).map_err(CommandError::failed)?;
+    let mut builder = zip::write::ZipFileBuilder::new(name, options)
+        .map_err(|e| map_zip_err(e, name))?;
+    let mut buffer = vec![0u8; 128 * 1024];
+    let mut bytes = 0u64;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(CommandError::cancelled());
+        }
+        let read = file.read(&mut buffer).map_err(CommandError::failed)?;
+        if read == 0 {
+            break;
+        }
+        builder
+            .write_all(&buffer[..read])
+            .map_err(CommandError::failed)?;
+        bytes += read as u64;
     }
-    sources
-        .iter()
-        .map(|source| {
-            if source.is_dir() {
-                count_dir(source)
-            } else {
-                1
+    let prepared = builder.finish().map_err(|e| map_zip_err(e, name))?;
+    Ok((bytes, prepared))
+}
+
+/// Worker du pool : pioche le fichier suivant, le compresse, envoie le
+/// résultat au rédacteur. S'arrête dès qu'une erreur ou une annulation est
+/// signalée (`stop`), ou quand le rédacteur a quitté (canal fermé).
+fn compress_worker(
+    ctx: &OpContext,
+    files: &[(String, PathBuf)],
+    next: &AtomicUsize,
+    stop: &AtomicBool,
+    options: SimpleFileOptions,
+    tx: mpsc::SyncSender<CompressedFile>,
+) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        let Some((name, path)) = files.get(index) else {
+            return; // plus rien à compresser
+        };
+        match compress_one(ctx, stop, name, path, options) {
+            Ok((bytes, prepared)) => {
+                if tx
+                    .send(CompressedFile::Prepared {
+                        name: name.clone(),
+                        bytes,
+                        file: prepared,
+                    })
+                    .is_err()
+                {
+                    return; // rédacteur parti (erreur ou annulation)
+                }
             }
-        })
-        .sum()
+            Err(error) => {
+                stop.store(true, Ordering::Relaxed);
+                let _ = tx.send(CompressedFile::Failed(error));
+                return;
+            }
+        }
+    }
 }
 
 /// Vrai si la destination de l'archive se trouve dans un dossier source :
@@ -763,62 +836,6 @@ fn dest_inside_sources(dest: &Path, sources: &[PathBuf]) -> bool {
     })
 }
 
-fn add_file_to_zip<W: Write + io::Seek>(
-    ctx: &OpContext,
-    total: u64,
-    zip: &mut ZipWriter<W>,
-    name: &str,
-    path: &Path,
-    options: SimpleFileOptions,
-    result: &mut OperationResult,
-) -> CommandResult<()> {
-    ctx.check()?;
-    let mut file = File::open(path).map_err(CommandError::failed)?;
-    // Copie par morceaux : un gros fichier ne doit pas être chargé en
-    // mémoire intégralement.
-    zip.start_file(name, options).map_err(|e| map_zip_err(e, name))?;
-    let mut buffer = vec![0u8; 128 * 1024];
-    let mut written: u64 = 0;
-    loop {
-        let read = file.read(&mut buffer).map_err(CommandError::failed)?;
-        if read == 0 {
-            break;
-        }
-        zip.write_all(&buffer[..read]).map_err(CommandError::failed)?;
-        written += read as u64;
-    }
-    result.files += 1;
-    result.bytes += written;
-    ctx.progress(result.files, total, name);
-    Ok(())
-}
-
-fn add_dir_to_zip<W: Write + io::Seek>(
-    ctx: &OpContext,
-    total: u64,
-    zip: &mut ZipWriter<W>,
-    prefix: &str,
-    dir: &Path,
-    options: SimpleFileOptions,
-    result: &mut OperationResult,
-) -> CommandResult<()> {
-    let entries = fs::read_dir(dir).map_err(CommandError::failed)?;
-    for entry in entries {
-        let entry = entry.map_err(CommandError::failed)?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        let zip_name = format!("{prefix}{name}");
-        if path.is_dir() {
-            zip.add_directory(&zip_name, options)
-                .map_err(|e| map_zip_err(e, &zip_name))?;
-            add_dir_to_zip(ctx, total, zip, &format!("{zip_name}/"), &path, options, result)?;
-        } else {
-            add_file_to_zip(ctx, total, zip, &zip_name, &path, options, result)?;
-        }
-    }
-    Ok(())
-}
-
 fn map_zip_err(error: ZipError, name: &str) -> CommandError {
     match error {
         ZipError::UnsupportedArchive(reason) => {
@@ -828,17 +845,39 @@ fn map_zip_err(error: ZipError, name: &str) -> CommandError {
     }
 }
 
-/// Écrit toutes les sources dans le writer ZIP.
-fn write_sources<W: Write + io::Seek>(
-    ctx: &OpContext,
-    total: u64,
+/// Parcourt les sources : ajoute les entrées de dossier à l'archive (dans
+/// l'ordre du parcours) et collecte les fichiers à compresser.
+fn collect_zip_plan<W: Write + io::Seek>(
     zip: &mut ZipWriter<W>,
-    sources: &[PathBuf],
     options: SimpleFileOptions,
-    result: &mut OperationResult,
-) -> CommandResult<()> {
+    sources: &[PathBuf],
+) -> CommandResult<Vec<(String, PathBuf)>> {
+    fn walk_dir<W: Write + io::Seek>(
+        zip: &mut ZipWriter<W>,
+        options: SimpleFileOptions,
+        prefix: &str,
+        dir: &Path,
+        files: &mut Vec<(String, PathBuf)>,
+    ) -> CommandResult<()> {
+        let entries = fs::read_dir(dir).map_err(CommandError::failed)?;
+        for entry in entries {
+            let entry = entry.map_err(CommandError::failed)?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let zip_name = format!("{prefix}{name}");
+            if path.is_dir() {
+                zip.add_directory(&zip_name, options)
+                    .map_err(|e| map_zip_err(e, &zip_name))?;
+                walk_dir(zip, options, &format!("{zip_name}/"), &path, files)?;
+            } else {
+                files.push((zip_name, path));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
     for source in sources {
-        let source = source.as_path();
         let name = source
             .file_name()
             .ok_or_else(|| {
@@ -847,11 +886,102 @@ fn write_sources<W: Write + io::Seek>(
             .to_string_lossy()
             .to_string();
         if source.is_dir() {
-            zip.add_directory(&name, options).map_err(CommandError::failed)?;
-            add_dir_to_zip(ctx, total, zip, &format!("{name}/"), source, options, result)?;
+            zip.add_directory(&name, options)
+                .map_err(CommandError::failed)?;
+            walk_dir(zip, options, &format!("{name}/"), source, &mut files)?;
         } else {
-            add_file_to_zip(ctx, total, zip, &name, source, options, result)?;
+            files.push((name, source.clone()));
         }
+    }
+    Ok(files)
+}
+
+/// Compresse et écrit les fichiers dans l'archive. `small` passe par le
+/// pool de threads (le rédacteur écrit les entrées au fur et à mesure de
+/// leur achèvement) ; `big` — gros fichiers — est compressé en flux,
+/// séquentiellement, pour borner la mémoire.
+fn compress_and_append<W: Write + io::Seek>(
+    ctx: &OpContext,
+    zip: &mut ZipWriter<W>,
+    small: &[(String, PathBuf)],
+    big: &[(String, PathBuf)],
+    options: SimpleFileOptions,
+    result: &mut OperationResult,
+) -> CommandResult<()> {
+    let total = (small.len() + big.len()) as u64;
+    let workers = worker_count();
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+
+    let outcome = thread::scope(|scope| -> CommandResult<()> {
+        let (tx, rx) = mpsc::sync_channel::<CompressedFile>(2);
+        for _ in 0..workers {
+            let tx = tx.clone();
+            scope.spawn(|| compress_worker(ctx, small, &next, &stop, options, tx));
+        }
+        drop(tx);
+
+        let mut failure: Option<CommandError> = None;
+        let mut committed = 0;
+        while failure.is_none() && committed < small.len() {
+            // Annulation : on informe les workers et on s'arrête vite ;
+            // `drop(rx)` réveille ceux qui attendraient dans `send`.
+            if let Err(error) = ctx.check() {
+                failure = Some(error);
+                break;
+            }
+            match rx.recv() {
+                Ok(CompressedFile::Prepared { name, bytes, file }) => {
+                    if let Err(error) =
+                        zip.add_prepared_file(file).map_err(|e| map_zip_err(e, &name))
+                    {
+                        failure = Some(error);
+                        break;
+                    }
+                    result.files += 1;
+                    result.bytes += bytes;
+                    committed += 1;
+                    ctx.progress(result.files, total, &name);
+                }
+                Ok(CompressedFile::Failed(error)) => {
+                    failure = Some(error);
+                }
+                // Canal fermé avant la fin : n'arrive qu'après une erreur
+                // (déjà consignée) ; on sort pour éviter un blocage.
+                Err(_) => break,
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        drop(rx);
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if committed != small.len() {
+            return Err(CommandError::failed("Compression interrompue."));
+        }
+        Ok(())
+    });
+    outcome?;
+
+    // Gros fichiers : compression en flux, séquentielle.
+    for (name, path) in big {
+        ctx.check()?;
+        let mut file = File::open(path).map_err(CommandError::failed)?;
+        zip.start_file(name, options)
+            .map_err(|e| map_zip_err(e, name))?;
+        let mut buffer = vec![0u8; 128 * 1024];
+        let mut bytes = 0u64;
+        loop {
+            let read = file.read(&mut buffer).map_err(CommandError::failed)?;
+            if read == 0 {
+                break;
+            }
+            zip.write_all(&buffer[..read]).map_err(CommandError::failed)?;
+            bytes += read as u64;
+        }
+        result.files += 1;
+        result.bytes += bytes;
+        ctx.progress(result.files, total, name);
     }
     Ok(())
 }
@@ -886,6 +1016,19 @@ fn create_zip_inner(
     dest: &Path,
     sources: &[PathBuf],
 ) -> CommandResult<OperationResult> {
+    create_zip_with_limit(app, registry, id, dest, sources, PARALLEL_MAX_FILE_SIZE)
+}
+
+/// `parallel_max_file` : taille limite des fichiers passés au pool ; les
+/// fichiers plus gros sont compressés en flux (paramétrable pour les tests).
+fn create_zip_with_limit(
+    app: Option<&AppHandle>,
+    registry: Option<&OperationRegistry>,
+    id: &str,
+    dest: &Path,
+    sources: &[PathBuf],
+    parallel_max_file: u64,
+) -> CommandResult<OperationResult> {
     if sources.is_empty() {
         return Err(CommandError::failed("Aucun fichier source fourni."));
     }
@@ -904,15 +1047,28 @@ fn create_zip_inner(
         registry,
         id,
     };
-    let total = count_sources(sources);
     let mut result = OperationResult { files: 0, bytes: 0 };
     let file = File::create(dest).map_err(CommandError::failed)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    // Les dossiers sont écrits pendant le parcours ; les fichiers sont
+    // répartis entre le pool parallèle et le flux séquentiel.
+    let outcome = collect_zip_plan(&mut zip, options, sources).and_then(|files| {
+        let mut small = Vec::new();
+        let mut big = Vec::new();
+        for (name, path) in files {
+            let is_big = fs::metadata(&path).is_ok_and(|m| m.len() > parallel_max_file);
+            if is_big {
+                big.push((name, path));
+            } else {
+                small.push((name, path));
+            }
+        }
+        compress_and_append(&ctx, &mut zip, &small, &big, options, &mut result)
+    });
     // `finish` consomme le writer : la chaîne ci-dessous garantit sa
     // destruction (donc la fermeture du fichier) avant le nettoyage.
-    let outcome = write_sources(&ctx, total, &mut zip, sources, options, &mut result)
-        .and_then(|_| zip.finish().map_err(CommandError::failed));
+    let outcome = outcome.and_then(|_| zip.finish().map_err(CommandError::failed));
     if let Err(error) = outcome {
         // Ne laisse pas d'archive partielle sur disque.
         let _ = fs::remove_file(dest);
@@ -1025,6 +1181,68 @@ mod tests {
         assert!(registry.is_cancelled("op-1"));
         registry.end("op-1");
         assert!(!registry.is_cancelled("op-1"));
+    }
+
+    #[test]
+    fn creation_parallelise_roundtrip() {
+        let root = temp_root("parallel");
+        let source_dir = root.join("sources");
+        for i in 0..50 {
+            write(
+                &source_dir.join(format!("sub/f{i}.txt")),
+                &format!("contenu {i}"),
+            );
+        }
+        let archive = root.join("test.zip");
+
+        let created = create_zip_inner(None, None, "", &archive, &[source_dir.clone()]).unwrap();
+        assert_eq!(created.files, 50);
+        // « contenu 0 »…« contenu 49 » : 10 fichiers de 9 octets + 40 de 10.
+        assert_eq!(created.bytes, 10 * 9 + 40 * 10);
+
+        let entries = list_archive_inner(&archive, None).unwrap();
+        assert_eq!(
+            entries.iter().filter(|e| !e.is_dir).count(),
+            50,
+            "chaque fichier doit apparaître dans le listing"
+        );
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let extracted = extract(&archive, &out, None, None).unwrap();
+        assert_eq!(extracted.files, 50);
+        assert_eq!(
+            fs::read_to_string(out.join("sources/sub/f49.txt")).unwrap(),
+            "contenu 49"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn gros_fichiers_compresses_en_flux() {
+        // Seuil abaissé à 1 octet : tous les fichiers passent par le
+        // chemin séquentiel (streaming) — même résultat, même contenu.
+        let root = temp_root("flux");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        write(&source_dir.join("b.txt"), "contenu B");
+        let archive = root.join("test.zip");
+
+        let created =
+            create_zip_with_limit(None, None, "", &archive, &[source_dir.clone()], 1).unwrap();
+        assert_eq!(created.files, 2);
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let extracted = extract(&archive, &out, None, None).unwrap();
+        assert_eq!(extracted.files, 2);
+        assert_eq!(
+            fs::read_to_string(out.join("sources/a.txt")).unwrap(),
+            "contenu A"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
