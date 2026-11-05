@@ -28,6 +28,8 @@ pub struct ArchiveEntry {
 pub struct OperationResult {
     pub files: u64,
     pub bytes: u64,
+    /// Durée de l'opération (annulation et nettoyage exclus).
+    pub elapsed_ms: u64,
 }
 
 /// Erreur d'une commande IPC, sérialisée vers le frontend sous la forme
@@ -494,7 +496,7 @@ fn extract_zip(
         files += 1;
         bytes += size;
     }
-    Ok(OperationResult { files, bytes })
+    Ok(OperationResult { files, bytes, elapsed_ms: 0 })
 }
 
 fn extract_rar(
@@ -519,7 +521,7 @@ fn extract_rar(
         ctx.check()?;
         let before_file = match open.read_header().map_err(rar_err)? {
             Some(next) => next,
-            None => return Ok(OperationResult { files, bytes }),
+            None => return Ok(OperationResult { files, bytes, elapsed_ms: 0 }),
         };
         let header = before_file.entry();
         let name = header.filename.to_string_lossy().replace('\\', "/");
@@ -573,7 +575,7 @@ fn extract_sevenz(
     };
     let mut reader = sevenz_rust::SevenZReader::open(path, password).map_err(sevenz_err)?;
     let total = reader.archive().files.len() as u64;
-    let mut result = OperationResult { files: 0, bytes: 0 };
+    let mut result = OperationResult { files: 0, bytes: 0, elapsed_ms: 0 };
     let mut failure: Option<CommandError> = None;
     let mut done = 0;
     reader
@@ -691,11 +693,15 @@ fn extract_archive_inner(
         id,
     };
     let mut written = ExtractedFiles::default();
-    let result = match detect_format(path)? {
+    let start = std::time::Instant::now();
+    let mut result = match detect_format(path)? {
         "zip" => extract_zip(&ctx, path, dest_dir, password, selection, &mut written),
         "rar" => extract_rar(&ctx, path, dest_dir, password, selection, &mut written),
         _ => extract_sevenz(&ctx, path, dest_dir, password, selection, &mut written),
     };
+    if let Ok(result) = &mut result {
+        result.elapsed_ms = start.elapsed().as_millis() as u64;
+    }
     // Échec ou annulation : ne laisse aucun fichier partiel.
     if result.is_err() {
         written.clean();
@@ -1047,7 +1053,8 @@ fn create_zip_with_limit(
         registry,
         id,
     };
-    let mut result = OperationResult { files: 0, bytes: 0 };
+    let mut result = OperationResult { files: 0, bytes: 0, elapsed_ms: 0 };
+    let start = std::time::Instant::now();
     let file = File::create(dest).map_err(CommandError::failed)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -1074,6 +1081,7 @@ fn create_zip_with_limit(
         let _ = fs::remove_file(dest);
         return Err(error);
     }
+    result.elapsed_ms = start.elapsed().as_millis() as u64;
     Ok(result)
 }
 

@@ -8,6 +8,8 @@ export interface ArchiveEntry {
 export interface OperationResult {
   files: number;
   bytes: number;
+  /** Durée de l'opération en millisecondes. */
+  elapsedMs: number;
 }
 
 export type ArchiveFormat = "zip" | "rar" | "sevenz";

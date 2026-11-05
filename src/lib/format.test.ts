@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compressionRatio, entryBaseName, fileNameOf, formatBytes } from "./format";
+import { compressionRatio, entryBaseName, fileNameOf, formatBytes, formatDuration } from "./format";
 
 describe("formatBytes", () => {
   it("formate les petites tailles", () => {
@@ -41,5 +41,25 @@ describe("entryBaseName", () => {
   it("ignore les slashs finaux des dossiers", () => {
     expect(entryBaseName("docs/")).toBe("docs");
     expect(entryBaseName("docs/readme.md")).toBe("readme.md");
+  });
+});
+
+describe("formatDuration", () => {
+  it("affiche les millisecondes sous 1 s", () => {
+    expect(formatDuration(0)).toBe("0 ms");
+    expect(formatDuration(245.4)).toBe("245 ms");
+    expect(formatDuration(999)).toBe("999 ms");
+  });
+
+  it("affiche les secondes au-dessus, avec virgule décimale", () => {
+    expect(formatDuration(1000)).toBe("1,0 s");
+    expect(formatDuration(1290)).toBe("1,3 s");
+    expect(formatDuration(64200)).toBe("64,2 s");
+  });
+
+  it("retourne un tiret pour les valeurs invalides", () => {
+    expect(formatDuration(-5)).toBe("—");
+    expect(formatDuration(Number.NaN)).toBe("—");
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("—");
   });
 });

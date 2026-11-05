@@ -18,6 +18,13 @@ export function compressionRatio(size: number, compressedSize: number): string {
   return `${Math.round(ratio)} %`;
 }
 
+/** Formate une durée en millisecondes : « 245 ms », « 1,3 s ». */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1).replace(".", ",")} s`;
+}
+
 export function fileNameOf(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : path;

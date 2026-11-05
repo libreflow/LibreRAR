@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { ArchiveEntry, ArchiveFormat, OperationResult, Status } from "./types";
-import { fileNameOf, formatBytes } from "./lib/format";
+import { fileNameOf, formatBytes, formatDuration } from "./lib/format";
 import { sortEntries, implicitDirectories } from "./lib/entries";
 import {
   asAppError,
@@ -273,7 +273,7 @@ export default function App() {
         );
         setStatus({
           kind: "success",
-          message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} extraits vers ${destDir}`,
+          message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} extraits en ${formatDuration(result.elapsedMs)} vers ${destDir}`,
         });
         setLastResult(result);
         setExtractDest(destDir);
@@ -313,7 +313,7 @@ export default function App() {
         const result = await createZip(id, dest, sources);
         setStatus({
           kind: "success",
-          message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} compressé(s) → ${dest}`,
+          message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} compressé(s) en ${formatDuration(result.elapsedMs)} → ${dest}`,
         });
         setLastResult(result);
         setCreating(false);
