@@ -57,26 +57,31 @@ export function sortEntriesBy(
 }
 
 /**
- * Trie les chemins de dossiers parents implicites à partir des chemins d'entrées.
+ * Complète les entrées avec les dossiers parents implicites (une archive
+ * peut lister « a/b.txt » sans entrée « a/ »). Les fichiers et dossiers
+ * explicites sont conservés tels quels ; les doublons de chemin sont
+ * ignorés (une archive ZIP peut contenir le même nom deux fois).
  */
 export function implicitDirectories(entries: ArchiveEntry[]): ArchiveEntry[] {
   const seen = new Map<string, ArchiveEntry>();
-  for (const entry of entries) {
-    if (entry.isDir) {
-      if (!seen.has(entry.path)) seen.set(entry.path, entry);
-      continue;
+  const rememberDir = (dirPath: string) => {
+    if (!seen.has(dirPath)) {
+      seen.set(dirPath, {
+        path: dirPath,
+        size: 0,
+        compressedSize: 0,
+        isDir: true,
+      });
     }
+  };
+  for (const entry of entries) {
+    if (!seen.has(entry.path)) {
+      seen.set(entry.path, entry);
+    }
+    if (entry.isDir) continue;
     const segments = entry.path.split("/").filter(Boolean);
     for (let i = 1; i < segments.length; i++) {
-      const dirPath = `${segments.slice(0, i).join("/")}/`;
-      if (!seen.has(dirPath)) {
-        seen.set(dirPath, {
-          path: dirPath,
-          size: 0,
-          compressedSize: 0,
-          isDir: true,
-        });
-      }
+      rememberDir(`${segments.slice(0, i).join("/")}/`);
     }
   }
   return [...seen.values()];

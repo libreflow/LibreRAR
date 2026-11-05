@@ -214,7 +214,9 @@ fn normalize_password(password: &Option<String>) -> Option<&str> {
 /// Une entrée fait partie de la sélection si :
 /// - elle est désignée nom pour nom ;
 /// - elle se trouve dans un dossier sélectionné (le contenu d'un dossier
-///   sélectionné est extrait) ;
+///   sélectionné est extrait) — seules les sélections de dossier (slash
+///   final, garanti par le listing) rattachent un contenu, sinon un
+///   fichier « notes » sélectionné capterait « notes/a.txt » ;
 /// - c'est un dossier dont la sélection contient un descendant (le dossier
 ///   parent est alors créé pour son contenu).
 ///
@@ -225,11 +227,12 @@ fn is_selected(name: &str, is_dir: bool, selection: &HashSet<String>) -> bool {
         return true;
     }
     for selected in selection {
-        let selected_dir = selected.trim_end_matches('/');
         // Entrée située dans un dossier sélectionné.
-        if let Some(rest) = name.strip_prefix(selected_dir) {
-            if rest.is_empty() || rest.starts_with('/') {
-                return true;
+        if selected.ends_with('/') {
+            if let Some(rest) = name.strip_prefix(selected.trim_end_matches('/')) {
+                if rest.is_empty() || rest.starts_with('/') {
+                    return true;
+                }
             }
         }
         // Dossier parent d'un élément sélectionné.
@@ -304,17 +307,34 @@ fn safe_join(root: &Path, entry_name: &str) -> CommandResult<PathBuf> {
 // Listing
 // ---------------------------------------------------------------------------
 
+/// Normalise le nom d'une entrée de dossier : slash final garanti. Le
+/// listing, la sélection et l'affichage s'accordent ainsi sur une seule
+/// forme, quel que soit le format (un dossier 7z ou ZIP peut être listé
+/// sans slash final).
+fn dir_entry_path(mut name: String) -> String {
+    if !name.ends_with('/') {
+        name.push('/');
+    }
+    name
+}
+
 fn list_zip(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
     let file = File::open(path).map_err(CommandError::failed)?;
     let mut archive = ZipArchive::new(file).map_err(zip_err)?;
     let mut entries = Vec::with_capacity(archive.len() as usize);
     for index in 0..archive.len() {
         let entry = archive.by_index_raw(index).map_err(zip_err)?;
+        let path = entry.name().replace('\\', "/");
+        let is_dir = entry.is_dir() || path.ends_with('/');
         entries.push(ArchiveEntry {
-            path: entry.name().replace('\\', "/"),
+            path: if is_dir {
+                dir_entry_path(path)
+            } else {
+                path
+            },
             size: entry.size(),
             compressed_size: entry.compressed_size(),
-            is_dir: entry.is_dir(),
+            is_dir,
         });
     }
     Ok(entries)
@@ -360,11 +380,18 @@ fn list_sevenz(path: &Path, password: Option<&str>) -> CommandResult<Vec<Archive
     Ok(archive
         .files
         .iter()
-        .map(|entry| ArchiveEntry {
-            path: entry.name.replace('\\', "/"),
-            size: entry.size,
-            compressed_size: entry.compressed_size,
-            is_dir: entry.is_directory,
+        .map(|entry| {
+            let path = entry.name.replace('\\', "/");
+            ArchiveEntry {
+                path: if entry.is_directory {
+                    dir_entry_path(path)
+                } else {
+                    path
+                },
+                size: entry.size,
+                compressed_size: entry.compressed_size,
+                is_dir: entry.is_directory,
+            }
         })
         .collect())
 }
@@ -747,12 +774,21 @@ fn add_file_to_zip<W: Write + io::Seek>(
 ) -> CommandResult<()> {
     ctx.check()?;
     let mut file = File::open(path).map_err(CommandError::failed)?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data).map_err(CommandError::failed)?;
+    // Copie par morceaux : un gros fichier ne doit pas être chargé en
+    // mémoire intégralement.
     zip.start_file(name, options).map_err(|e| map_zip_err(e, name))?;
-    zip.write_all(&data).map_err(CommandError::failed)?;
+    let mut buffer = vec![0u8; 128 * 1024];
+    let mut written: u64 = 0;
+    loop {
+        let read = file.read(&mut buffer).map_err(CommandError::failed)?;
+        if read == 0 {
+            break;
+        }
+        zip.write_all(&buffer[..read]).map_err(CommandError::failed)?;
+        written += read as u64;
+    }
     result.files += 1;
-    result.bytes += data.len() as u64;
+    result.bytes += written;
     ctx.progress(result.files, total, name);
     Ok(())
 }
@@ -1091,22 +1127,57 @@ mod tests {
     }
 
     #[test]
+    fn selection_dun_fichier_ne_capte_pas_un_dossier_homonyme() {
+        let root = temp_root("homonyme");
+        let archive = root.join("test.zip");
+        make_zip(
+            &archive,
+            &[
+                ("notes", "fichier nommé notes"),
+                ("notes/a.txt", "contenu A"),
+                ("d/", ""),
+                ("d/x.txt", "contenu X"),
+            ],
+        );
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        // Sélection du seul fichier « notes » : son homonyme dossier
+        // (« notes/a.txt ») ne doit pas être extrait.
+        extract(&archive, &out, None, Some(&selection(&["notes"]))).unwrap();
+        assert!(out.join("notes").is_file());
+        assert!(!out.join("notes/a.txt").exists());
+        assert!(!out.join("d/x.txt").exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn roundtrip_sevenz() {
         let root = temp_root("7z");
         let source_dir = root.join("sources");
         write(&source_dir.join("a.txt"), "contenu A");
         write(&source_dir.join("b.txt"), "contenu B");
+        write(&source_dir.join("sous/c.txt"), "contenu C");
         let archive = root.join("test.7z");
 
         sevenz_rust::compress_to_path(&source_dir, &archive).unwrap();
 
         let entries = list_archive_inner(&archive, None).unwrap();
         assert!(entries.iter().any(|e| e.path == "a.txt"));
+        // Les dossiers sont listés avec un slash final, quel que soit le format.
+        if let Some(dir_entry) = entries.iter().find(|e| e.is_dir) {
+            assert!(
+                dir_entry.path.ends_with('/'),
+                "dossier sans slash final : {}",
+                dir_entry.path
+            );
+        }
 
         let out = root.join("out");
         fs::create_dir_all(&out).unwrap();
         let extracted = extract(&archive, &out, None, None).unwrap();
-        assert_eq!(extracted.files, 2);
+        assert_eq!(extracted.files, 3);
         fs::remove_dir_all(&root).unwrap();
     }
 

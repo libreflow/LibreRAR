@@ -80,16 +80,27 @@ describe("sortEntriesBy", () => {
 });
 
 describe("implicitDirectories", () => {
-  it("déduit les dossiers parents manquants", () => {
+  it("déduit les dossiers parents manquants sans perdre les fichiers", () => {
     const result = implicitDirectories([file("docs/img/logo.png")]);
     const paths = result.map((e) => e.path);
     expect(paths).toContain("docs/");
     expect(paths).toContain("docs/img/");
-    expect(result.every((e) => e.isDir)).toBe(true);
+    // Régression : les fichiers doivent être conservés dans le listing.
+    expect(paths).toContain("docs/img/logo.png");
+  });
+
+  it("conserve les fichiers sans dossier parent", () => {
+    const result = implicitDirectories([file("image.png"), file("a.txt")]);
+    expect(result.map((e) => e.path).sort()).toEqual(["a.txt", "image.png"]);
   });
 
   it("ne duplique pas les dossiers explicites", () => {
     const result = implicitDirectories([dir("docs/"), file("docs/a.txt")]);
+    expect(result.map((e) => e.path).sort()).toEqual(["docs/", "docs/a.txt"]);
+  });
+
+  it("ignore les doublons de chemin (ZIP peut répéter un nom)", () => {
+    const result = implicitDirectories([file("a.txt"), file("a.txt")]);
     expect(result).toHaveLength(1);
   });
 });

@@ -65,9 +65,15 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
-  // Archive dont la lecture a échoué (mot de passe probablement requis).
+  // Archive dont la lecture (ou l'extraction) a échoué : mot de passe
+  // probablement requis. `pendingExtract` garde les paramètres d'une
+  // extraction échouée pour rejouer avec le mot de passe saisi.
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [pendingPassword, setPendingPassword] = useState("");
+  const [pendingExtract, setPendingExtract] = useState<{
+    destDir: string;
+    selection: string[];
+  } | null>(null);
   // Easter egg : dernier résultat d'opération, affiché par la séquence « JIMBO ».
   const [lastResult, setLastResult] = useState<OperationResult | null>(null);
   const [showBalatro, setShowBalatro] = useState(false);
@@ -81,6 +87,12 @@ export default function App() {
   const [cancellable, setCancellable] = useState(false);
   const [extractDest, setExtractDest] = useState<string | null>(null);
   const opIdRef = useRef("");
+  // Le handler de glisser-déposer doit ignorer les drops pendant une
+  // opération même quand sa closure est déjà enregistrée.
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
 
   // Progression émise par le backend, filtrée sur l'opération en cours.
   useEffect(() => {
@@ -153,45 +165,58 @@ export default function App() {
       setConfirmClose(true);
       return;
     }
+    // Réarme la confirmation : la prochaine archive ne doit pas se
+    // fermer en un seul clic tant que le délai n'est pas écoulé.
+    setConfirmClose(false);
     setArchive(null);
   };
 
-  const openArchive = useCallback(async (path: string, password: string | null = null) => {
-    const name = fileNameOf(path);
-    const format = detectFormat(name);
-    if (!format) {
-      setStatus({
-        kind: "error",
-        message: `Format non pris en charge : ${name}`,
-      });
-      return;
-    }
-    setBusy(true);
-    setStatus(null);
-    try {
-      const rawEntries = await listArchive(path, password);
-      const entries = sortEntries(implicitDirectories(rawEntries));
-      setArchive({ path, name, format, entries });
-      setPendingPath(null);
-      setStatus({
-        kind: "info",
-        message: `${entries.filter((e) => !e.isDir).length} fichier(s) — ${name}`,
-      });
-    } catch (error) {
-      const appError = asAppError(error);
-      setStatus({
-        kind: "error",
-        message: `Impossible de lire l'archive : ${appError.message}`,
-      });
-      // Le prompt de mot de passe n'apparaît que si le backend signale
-      // un mot de passe manquant/incorrect (pas pour un fichier corrompu).
-      if (appError.kind === "passwordRequired") {
-        setPendingPath(path);
+  const openArchive = useCallback(
+    async (path: string, password: string | null = null, announce = true) => {
+      const name = fileNameOf(path);
+      const format = detectFormat(name);
+      if (!format) {
+        setStatus({
+          kind: "error",
+          message: `Format non pris en charge : ${name}`,
+        });
+        return;
       }
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+      // Le listing n'est ni annulable ni progressive : masque le bouton
+      // ANNULER d'une opération précédente (ex. création terminée).
+      setCancellable(false);
+      setProgress(null);
+      setBusy(true);
+      setStatus(null);
+      try {
+        const rawEntries = await listArchive(path, password);
+        const entries = sortEntries(implicitDirectories(rawEntries));
+        setArchive({ path, name, format, entries });
+        setPendingPath(null);
+        setPendingExtract(null);
+        if (announce) {
+          setStatus({
+            kind: "info",
+            message: `${entries.filter((e) => !e.isDir).length} fichier(s) — ${name}`,
+          });
+        }
+      } catch (error) {
+        const appError = asAppError(error);
+        setStatus({
+          kind: "error",
+          message: `Impossible de lire l'archive : ${appError.message}`,
+        });
+        // Le prompt de mot de passe n'apparaît que si le backend signale
+        // un mot de passe manquant/incorrect (pas pour un fichier corrompu).
+        if (appError.kind === "passwordRequired") {
+          setPendingPath(path);
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
 
   const chooseArchive = useCallback(async () => {
     const path = await open({ multiple: false, filters: ARCHIVE_FILTERS });
@@ -209,6 +234,13 @@ export default function App() {
       const paths = event.payload.paths;
       const path = paths[0];
       if (!path) return;
+      if (busyRef.current) {
+        setStatus({
+          kind: "info",
+          message: "Opération en cours — impossible d'ouvrir une autre archive.",
+        });
+        return;
+      }
       void (async () => {
         await openArchive(path);
         if (paths.length > 1) {
@@ -245,6 +277,8 @@ export default function App() {
         });
         setLastResult(result);
         setExtractDest(destDir);
+        setPendingPath(null);
+        setPendingExtract(null);
       } catch (error) {
         const appError = asAppError(error);
         if (appError.kind === "cancelled") {
@@ -254,6 +288,12 @@ export default function App() {
             kind: "error",
             message: `Échec de l'extraction : ${appError.message}`,
           });
+          // Comme pour le listing : prompt de mot de passe si le backend
+          // signale un mot de passe manquant/incorrect (pas si corrompu).
+          if (appError.kind === "passwordRequired") {
+            setPendingPath(archive.path);
+            setPendingExtract({ destDir, selection });
+          }
         }
       } finally {
         setBusy(false);
@@ -277,7 +317,9 @@ export default function App() {
         });
         setLastResult(result);
         setCreating(false);
-        await openArchive(dest);
+        // Ouverture silencieuse : le message de succès de la création doit
+        // rester visible (l'info de listing l'écraserait).
+        await openArchive(dest, null, false);
       } catch (error) {
         const appError = asAppError(error);
         if (appError.kind === "cancelled") {
@@ -333,10 +375,16 @@ export default function App() {
   }, []);
 
   const retryWithPassword = useCallback(() => {
-    if (pendingPath) {
-      void openArchive(pendingPath, pendingPassword.length > 0 ? pendingPassword : null);
+    if (!pendingPath) return;
+    const password = pendingPassword.length > 0 ? pendingPassword : null;
+    // Extraction échouée : on rejoue avec le mot de passe saisi ; sinon,
+    // on relance le listing.
+    if (pendingExtract) {
+      void handleExtract(pendingExtract.destDir, password, pendingExtract.selection);
+    } else {
+      void openArchive(pendingPath, password);
     }
-  }, [pendingPath, pendingPassword, openArchive]);
+  }, [pendingPath, pendingExtract, pendingPassword, openArchive, handleExtract]);
 
   const pickSavePath = useCallback(
     async (sources: string[]) => {
@@ -493,7 +541,9 @@ export default function App() {
       {pendingPath && (
         <div className="password-prompt" role="alert">
           <span className="password-prompt-label">
-            Lecture de « {fileNameOf(pendingPath)} » impossible — mot de passe requis ?
+            {pendingExtract
+              ? `Extraction de « ${fileNameOf(pendingPath)} » impossible — mot de passe requis ?`
+              : `Lecture de « ${fileNameOf(pendingPath)} » impossible — mot de passe requis ?`}
           </span>
           <input
             type="password"
@@ -509,7 +559,13 @@ export default function App() {
           >
             Réessayer
           </button>
-          <button className="ghost" onClick={() => setPendingPath(null)}>
+          <button
+            className="ghost"
+            onClick={() => {
+              setPendingPath(null);
+              setPendingExtract(null);
+            }}
+          >
             Annuler
           </button>
         </div>
