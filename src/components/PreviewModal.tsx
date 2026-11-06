@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useModalDialog } from "../lib/useModalDialog";
 import { XIcon } from "./Icons";
 
 export interface PreviewData {
@@ -15,13 +15,7 @@ interface PreviewModalProps {
 
 /** Aperçu d'une entrée (texte ou image) sans extraction sur disque. */
 export default function PreviewModal({ preview, onClose }: PreviewModalProps) {
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  const dialogRef = useModalDialog(onClose);
 
   return (
     <div
@@ -35,6 +29,8 @@ export default function PreviewModal({ preview, onClose }: PreviewModalProps) {
         role="dialog"
         aria-modal="true"
         aria-label={`Aperçu de ${preview.entryName}`}
+        tabIndex={-1}
+        ref={dialogRef}
       >
         <div className="modal-title">
           <h2>Aperçu — {preview.entryName}</h2>

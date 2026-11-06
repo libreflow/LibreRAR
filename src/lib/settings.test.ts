@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  DEFAULT_SETTINGS,
-  loadSettings,
-  saveSettings,
-} from "./settings";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "./settings";
 
 // Stockage en mémoire pour isoler les tests de l'environnement.
 class MemoryStorage implements Storage {
@@ -53,6 +49,7 @@ describe("settings", () => {
         theme: "violet",
         autoDismissStatus: "oui",
         confirmBeforeClose: true,
+        crtEffects: "non",
       } as unknown as ReturnType<typeof loadSettings>,
       storage,
     );
@@ -60,11 +57,18 @@ describe("settings", () => {
     expect(loaded.theme).toBe("system");
     expect(loaded.autoDismissStatus).toBe(true);
     expect(loaded.confirmBeforeClose).toBe(true);
+    // Valeur invalide → valeur par défaut (effets CRT actifs).
+    expect(loaded.crtEffects).toBe(true);
   });
 
   it("fait un aller-retour complet", () => {
     storage = new MemoryStorage();
-    const settings = { theme: "dark" as const, autoDismissStatus: false, confirmBeforeClose: true };
+    const settings = {
+      theme: "dark" as const,
+      autoDismissStatus: false,
+      confirmBeforeClose: true,
+      crtEffects: false,
+    };
     saveSettings(settings, storage);
     expect(loadSettings(storage)).toEqual(settings);
   });

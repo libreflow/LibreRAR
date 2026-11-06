@@ -10,7 +10,9 @@ export default function DropZone({ busy, onPick }: DropZoneProps) {
     <div className="dropzone" aria-busy={busy}>
       <PackageIcon className="dropzone-icon" />
       <h2>Déposez une archive ici</h2>
-      <p className="dropzone-formats">RAR · ZIP · 7Z</p>
+      <p className="dropzone-formats">
+        RAR · ZIP · 7Z · JAR · TAR (gz/xz/zst) · volumes .001
+      </p>
       <p>ou parcourez vos fichiers</p>
       <button onClick={onPick} disabled={busy} autoFocus>
         Parcourir…

@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
 import type { AppSettings, ThemePreference } from "../lib/settings";
+import { useModalDialog } from "../lib/useModalDialog";
 import { SettingsIcon, XIcon } from "./Icons";
 
 interface SettingsPanelProps {
@@ -23,35 +23,7 @@ export default function SettingsPanel({
   onChange,
   onClose,
 }: SettingsPanelProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    dialogRef.current?.focus();
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
-        "button, input, [href]",
-      );
-      if (!focusables || focusables.length === 0) return;
-      const first = focusables[0]!;
-      const last = focusables[focusables.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  const dialogRef = useModalDialog(onClose);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -80,14 +52,20 @@ export default function SettingsPanel({
 
         <fieldset className="setting-group">
           <legend>Thème</legend>
-          <div className="segmented" role="radiogroup" aria-label="Thème de l'interface">
+          <div
+            className="segmented"
+            role="radiogroup"
+            aria-label="Thème de l'interface"
+          >
             {THEME_OPTIONS.map((option) => (
               <label key={option.value}>
                 <input
                   type="radio"
                   name="theme"
                   checked={settings.theme === option.value}
-                  onChange={() => onChange({ ...settings, theme: option.value })}
+                  onChange={() =>
+                    onChange({ ...settings, theme: option.value })
+                  }
                 />
                 <span>{option.label}</span>
               </label>
@@ -123,6 +101,21 @@ export default function SettingsPanel({
               checked={settings.confirmBeforeClose}
               onChange={(e) =>
                 onChange({ ...settings, confirmBeforeClose: e.target.checked })
+              }
+            />
+            <span className="switch-track" aria-hidden="true" />
+          </label>
+        </div>
+
+        <div className="setting-row">
+          <label htmlFor="setting-crt">Effets CRT (scanlines)</label>
+          <label className="switch">
+            <input
+              id="setting-crt"
+              type="checkbox"
+              checked={settings.crtEffects}
+              onChange={(e) =>
+                onChange({ ...settings, crtEffects: e.target.checked })
               }
             />
             <span className="switch-track" aria-hidden="true" />

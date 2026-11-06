@@ -3,6 +3,8 @@ export interface ArchiveEntry {
   size: number;
   compressedSize: number;
   isDir: boolean;
+  /** null/absent : caractère chiffré inconnu (RAR, 7z) ; false : jamais. */
+  encrypted?: boolean | null;
 }
 
 export interface OperationResult {

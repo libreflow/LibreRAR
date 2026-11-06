@@ -124,7 +124,8 @@ body {
   -webkit-font-smoothing: none;
 }
 
-/* Scanlines CRT, au-dessus de toute l'interface. */
+/* Scanlines CRT, au-dessus de toute l'interface — désactivables via les
+   paramètres (lisibilité) ou absentes si l'utilisateur réduit le mouvement. */
 body::after {
   content: "";
   position: fixed;
@@ -136,6 +137,10 @@ body::after {
     rgb(0 0 0 / 9%) 0 1px,
     transparent 1px 3px
   );
+}
+
+:root[data-crt="off"] body::after {
+  display: none;
 }
 
 .mono {
@@ -195,7 +200,7 @@ body::after {
 
 .status-action {
   background: var(--bg-row);
-  font-size: 8px;
+  font-size: 10px;
   padding: 6px 10px;
   flex-shrink: 0;
 }
@@ -221,7 +226,7 @@ body::after {
 
 kbd {
   font-family: var(--font-ui);
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text);
   background: var(--bg-row);
   border: 2px solid var(--border);
@@ -232,7 +237,7 @@ kbd {
 /* Badge de format d'archive. */
 .format-badge {
   font-family: var(--font-ui);
-  font-size: 8px;
+  font-size: 10px;
   padding: 4px 7px;
   border: 2px solid var(--border);
   box-shadow: 2px 2px 0 rgb(0 0 0 / 40%);
@@ -257,7 +262,6 @@ kbd {
 .format-tarxz,
 .format-tarzst {
   color: var(--gold);
-  font-size: 7px;
 }
 
 .app {
@@ -314,7 +318,7 @@ kbd {
 
 button {
   font-family: var(--font-ui);
-  font-size: 9px;
+  font-size: 10px;
   text-transform: uppercase;
   background: var(--bg-row);
   color: var(--text);
@@ -340,7 +344,8 @@ button:active:not(:disabled) {
 }
 
 button:disabled {
-  opacity: 0.5;
+  /* 0.65 : le texte reste lisible (WCAG 1.4.3) malgré l'état désactivé. */
+  opacity: 0.65;
   cursor: default;
 }
 
@@ -481,6 +486,7 @@ input:focus {
 
 .archive-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: center;
 }
@@ -511,7 +517,7 @@ input:focus {
 
 .entry-row {
   display: grid;
-  grid-template-columns: 40px 1fr 104px 104px 80px;
+  grid-template-columns: 40px 1fr 104px 104px 80px 44px;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -554,7 +560,7 @@ input:focus {
 .entry-head {
   color: var(--text-dim);
   font-family: var(--font-ui);
-  font-size: 8px;
+  font-size: 10px;
   position: sticky;
   top: 0;
   background: var(--bg-elevated);
@@ -772,6 +778,18 @@ input:focus {
   margin-top: 12px;
 }
 
+.split-custom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.split-custom input {
+  width: 120px;
+}
+
 /* — Aperçu d'entrée — */
 
 .preview-modal {
@@ -796,7 +814,6 @@ input:focus {
   max-width: 100%;
   max-height: 60vh;
   margin: 0 auto;
-  image-rendering: pixelated;
 }
 
 .cell-preview {
@@ -1152,4 +1169,17 @@ input:focus {
   font-size: 14px;
   letter-spacing: 0.12em;
   color: var(--text-dim);
+}
+
+/* ——— Préférence système : mouvement réduit (WCAG 2.3.3) ———
+   Toutes les animations décoratives (wobble, balayage, fond Balatro,
+   apparition des lignes) sont coupées ; les transitions restent valides. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

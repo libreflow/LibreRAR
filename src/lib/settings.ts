@@ -6,12 +6,15 @@ export interface AppSettings {
   autoDismissStatus: boolean;
   /** Demander une confirmation avant de fermer une archive ouverte. */
   confirmBeforeClose: boolean;
+  /** Effets CRT (scanlines) — désactivables pour la lisibilité. */
+  crtEffects: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
   autoDismissStatus: true,
   confirmBeforeClose: false,
+  crtEffects: true,
 };
 
 const STORAGE_KEY = "librerar.settings";
@@ -31,6 +34,10 @@ function normalize(partial: Partial<AppSettings>): AppSettings {
       typeof partial.confirmBeforeClose === "boolean"
         ? partial.confirmBeforeClose
         : DEFAULT_SETTINGS.confirmBeforeClose,
+    crtEffects:
+      typeof partial.crtEffects === "boolean"
+        ? partial.crtEffects
+        : DEFAULT_SETTINGS.crtEffects,
   };
 }
 
@@ -38,7 +45,9 @@ function normalize(partial: Partial<AppSettings>): AppSettings {
  * Charge les paramètres depuis le stockage local ; toute valeur invalide
  * ou corrompue retombe sur les valeurs par défaut.
  */
-export function loadSettings(storage: Storage = window.localStorage): AppSettings {
+export function loadSettings(
+  storage: Storage = window.localStorage,
+): AppSettings {
   try {
     const raw = storage.getItem(STORAGE_KEY);
     if (raw === null) return DEFAULT_SETTINGS;

@@ -1,38 +1,42 @@
-import { useEffect, useRef } from "react";
+import { useState } from "react";
+import { parseSplitSizeMB, splitSizeBytes } from "../lib/splitSize";
+import { useModalDialog } from "../lib/useModalDialog";
 import { XIcon } from "./Icons";
 
-export const SPLIT_SIZES: { label: string; bytes: number }[] = [
-  { label: "10 Mo", bytes: 10 * 1024 * 1024 },
-  { label: "100 Mo", bytes: 100 * 1024 * 1024 },
-  { label: "1 Go", bytes: 1024 * 1024 * 1024 },
+export const SPLIT_SIZES: { label: string; mib: number }[] = [
+  { label: "10 Mo", mib: 10 },
+  { label: "100 Mo", mib: 100 },
+  { label: "1 Go", mib: 1024 },
 ];
 
 interface SplitPanelProps {
   archiveName: string;
+  /** `partBytes` : taille de volume en octets ; `mib` : taille libre en Mio. */
   onPick: (partSize: number) => void;
   onClose: () => void;
 }
 
 /**
  * Choix de la taille des volumes pour la découpe d'une archive, en
- * fenêtre modale : fermeture par Échap ou clic sur l'arrière-plan.
+ * fenêtre modale : tailles proposées ou saisie libre (Mio).
  */
 export default function SplitPanel({
   archiveName,
   onPick,
   onClose,
 }: SplitPanelProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useModalDialog(onClose);
+  const [customSize, setCustomSize] = useState("");
+  const [sizeError, setSizeError] = useState<string | null>(null);
 
-  useEffect(() => {
-    dialogRef.current?.focus();
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  const submitCustom = () => {
+    const mib = parseSplitSizeMB(customSize);
+    if (mib === null) {
+      setSizeError("Taille invalide — saisir un nombre en Mo (ex. 250).");
+      return;
+    }
+    onPick(splitSizeBytes(mib));
+  };
 
   return (
     <div
@@ -61,11 +65,40 @@ export default function SplitPanel({
         </p>
         <div className="split-sizes">
           {SPLIT_SIZES.map((size) => (
-            <button key={size.label} onClick={() => onPick(size.bytes)}>
+            <button
+              key={size.label}
+              onClick={() => onPick(splitSizeBytes(size.mib))}
+            >
               {size.label}
             </button>
           ))}
         </div>
+        <div className="split-custom">
+          <label htmlFor="split-custom-size">Ou une taille (Mo)</label>
+          <input
+            id="split-custom-size"
+            type="text"
+            inputMode="decimal"
+            placeholder="250"
+            value={customSize}
+            aria-invalid={!!sizeError}
+            onChange={(e) => {
+              setCustomSize(e.target.value);
+              setSizeError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submitCustom();
+            }}
+          />
+          <button className="primary" onClick={submitCustom}>
+            Découper
+          </button>
+        </div>
+        {sizeError && (
+          <p className="create-password-error" role="alert">
+            {sizeError}
+          </p>
+        )}
       </div>
     </div>
   );

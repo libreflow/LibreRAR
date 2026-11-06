@@ -179,6 +179,16 @@ export default function App() {
     }
   }, [settings.theme]);
 
+  // Effets CRT : scanlines désactivables (lisibilité) via data-crt="off".
+  useEffect(() => {
+    const root = document.documentElement;
+    if (settings.crtEffects) {
+      delete root.dataset.crt;
+    } else {
+      root.dataset.crt = "off";
+    }
+  }, [settings.crtEffects]);
+
   // Mode Balatro : attribut data-mode sur <html> (palette + fond animé).
   useEffect(() => {
     const root = document.documentElement;
@@ -554,6 +564,8 @@ export default function App() {
       setStatus({
         kind: "success",
         message: `Somme SHA-256 exportée → ${dest}`,
+        // Le hash reste affiché (copiable) après l'export.
+        checksum: status.checksum,
       });
     } catch (error) {
       const appError = asAppError(error);
@@ -789,7 +801,10 @@ export default function App() {
       )}
 
       {status && (
-        <div className={`status status-${status.kind}`} role="status">
+        <div
+          className={`status status-${status.kind}`}
+          role={status.kind === "error" ? "alert" : "status"}
+        >
           {(() => {
             const StatusIcon = STATUS_ICONS[status.kind];
             return <StatusIcon className="status-icon" />;
@@ -937,7 +952,8 @@ export default function App() {
 
       <footer className="footer">
         <span>
-          LibreRAR — gestionnaire d'archives libre · RAR (lecture), ZIP, 7z
+          LibreRAR — gestionnaire d'archives libre · RAR (lecture), ZIP, 7z,
+          TAR, volumes
         </span>
         <span className="footer-shortcuts">
           <kbd>Ctrl+O</kbd> Ouvrir

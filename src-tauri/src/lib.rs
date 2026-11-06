@@ -29,6 +29,10 @@ pub struct ArchiveEntry {
     pub size: u64,
     pub compressed_size: u64,
     pub is_dir: bool,
+    /// `Some(true/false)` : le caractère chiffré est connu (ZIP, TAR) ;
+    /// absent : inconnu (RAR, 7z) — l'UI garde alors le champ mot de passe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -364,6 +368,7 @@ fn list_zip(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
         let entry = archive.by_index_raw(index).map_err(zip_err)?;
         let path = entry.name().map_err(zip_err)?.replace('\\', "/");
         let is_dir = entry.is_dir() || path.ends_with('/');
+        let encrypted = entry.encrypted();
         entries.push(ArchiveEntry {
             path: if is_dir {
                 dir_entry_path(path)
@@ -373,6 +378,7 @@ fn list_zip(path: &Path) -> CommandResult<Vec<ArchiveEntry>> {
             size: entry.size(),
             compressed_size: entry.compressed_size(),
             is_dir,
+            encrypted: Some(encrypted),
         });
     }
     Ok(entries)
@@ -402,6 +408,9 @@ fn list_rar(path: &Path, password: Option<&str>) -> CommandResult<Vec<ArchiveEnt
             size: header.unpacked_size,
             // Le crate unrar n'expose pas la taille compressée.
             compressed_size: 0,
+            // Le caractère chiffré n'est pas exposé non plus : le champ
+            // mot de passe reste affiché.
+            encrypted: None,
             is_dir,
         });
         open = before_file.skip().map_err(rar_err)?;
@@ -429,6 +438,8 @@ fn list_sevenz(path: &Path, password: Option<&str>) -> CommandResult<Vec<Archive
                 size: entry.size,
                 compressed_size: entry.compressed_size,
                 is_dir: entry.is_directory,
+                // Chiffrement des entrées non exposé par la crate.
+                encrypted: None,
             }
         })
         .collect())
@@ -490,6 +501,8 @@ fn list_tar(path: &Path, variant: &str) -> CommandResult<Vec<ArchiveEntry>> {
             // Flux compressé : la crate tar ne connaît pas la taille
             // compressée de chaque entrée (comme le RAR).
             compressed_size: 0,
+            // Un flux TAR n'est jamais chiffré.
+            encrypted: Some(false),
             is_dir,
         });
     }

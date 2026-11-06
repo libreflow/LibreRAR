@@ -52,6 +52,7 @@ export default function ArchiveView({
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortAsc, setSortAsc] = useState(true);
   const searchRef = useRef<HTMLInputElement>(null);
+  const tableRef = useRef<HTMLDivElement>(null);
 
   // Raccourci « / » : focus sur le filtre (hors champ de saisie).
   useEffect(() => {
@@ -134,6 +135,37 @@ export default function ArchiveView({
     return { files, size, compressed };
   }, [entries]);
 
+  // Champ mot de passe masqué si le backend peut prouver qu'aucune
+  // entrée n'est chiffrée (ZIP, TAR). RAR/7z : caractère inconnu → affiché.
+  const maybeEncrypted = useMemo(
+    () => entries.some((e) => e.encrypted !== false),
+    [entries],
+  );
+
+  // Navigation clavier : ↑/↓ déplacent le focus entre les lignes du
+  // tableau (chaque ligne est atteignable par sa case à cocher).
+  const navigateRows = (event: React.KeyboardEvent) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const rows = Array.from(
+      tableRef.current?.querySelectorAll<HTMLElement>(
+        ".entry-row:not(.entry-head) .checkbox",
+      ) ?? [],
+    );
+    if (rows.length === 0) return;
+    event.preventDefault();
+    const index = rows.findIndex(
+      (row) =>
+        row.contains(document.activeElement) || row === document.activeElement,
+    );
+    const next =
+      index === -1
+        ? 0
+        : event.key === "ArrowDown"
+          ? Math.min(index + 1, rows.length - 1)
+          : Math.max(index - 1, 0);
+    rows[next]?.focus();
+  };
+
   return (
     <section className="archive-view">
       <div className="archive-toolbar">
@@ -151,13 +183,15 @@ export default function ArchiveView({
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Filtrer les entrées"
         />
-        <input
-          type="password"
-          placeholder="Mot de passe (optionnel)"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          aria-label="Mot de passe de l'archive"
-        />
+        {(maybeEncrypted || password.length > 0) && (
+          <input
+            type="password"
+            placeholder="Mot de passe"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            aria-label="Mot de passe de l'archive"
+          />
+        )}
         <button
           className="primary"
           disabled={busy}
@@ -208,6 +242,10 @@ export default function ArchiveView({
         className="entry-table"
         role="table"
         aria-label={`Contenu de ${archiveName}`}
+        aria-rowcount={entries.length + 1}
+        aria-colcount={6}
+        ref={tableRef}
+        onKeyDown={navigateRows}
       >
         <div className="entry-row entry-head" role="row">
           <span role="columnheader">
@@ -277,6 +315,7 @@ export default function ArchiveView({
               Taux {sortIndicator("ratio")}
             </button>
           </span>
+          <span role="columnheader" aria-label="Aperçu" />
         </div>
         {visible.map((entry, index) => (
           <div
