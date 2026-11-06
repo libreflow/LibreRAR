@@ -3,7 +3,12 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { ArchiveEntry, ArchiveFormat, OperationResult, Status } from "./types";
+import type {
+  ArchiveEntry,
+  ArchiveFormat,
+  OperationResult,
+  Status,
+} from "./types";
 import { fileNameOf, formatBytes, formatDuration } from "./lib/format";
 import { sortEntries, implicitDirectories } from "./lib/entries";
 import {
@@ -16,6 +21,10 @@ import {
   type OperationProgress,
 } from "./lib/archiveApi";
 import { isTauri } from "./lib/platform";
+import {
+  createPasswordError,
+  effectiveCreatePassword,
+} from "./lib/createPassword";
 import { loadSettings, saveSettings, type AppSettings } from "./lib/settings";
 import { startChiptune } from "./lib/chiptune";
 import DropZone from "./components/DropZone";
@@ -62,6 +71,15 @@ export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [creating, setCreating] = useState(false);
   const [sources, setSources] = useState<string[]>([]);
+  // Chiffrement de l'archive créée (AES-256) : activation + saisie.
+  const [encryptionEnabled, setEncryptionEnabled] = useState(false);
+  const [createPassword, setCreatePassword] = useState("");
+  const [createPasswordConfirm, setCreatePasswordConfirm] = useState("");
+  const createPwdError = createPasswordError(
+    encryptionEnabled,
+    createPassword,
+    createPasswordConfirm,
+  );
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -96,11 +114,14 @@ export default function App() {
 
   // Progression émise par le backend, filtrée sur l'opération en cours.
   useEffect(() => {
-    const unlisten = listen<OperationProgress>("operation-progress", (event) => {
-      if (event.payload.id === opIdRef.current) {
-        setProgress(event.payload);
-      }
-    });
+    const unlisten = listen<OperationProgress>(
+      "operation-progress",
+      (event) => {
+        if (event.payload.id === opIdRef.current) {
+          setProgress(event.payload);
+        }
+      },
+    );
     return () => {
       void unlisten.then((fn) => fn());
     };
@@ -155,8 +176,12 @@ export default function App() {
 
   // Fermeture automatique des messages d'information/succès.
   useEffect(() => {
-    if (!status || status.kind === "error" || !settings.autoDismissStatus) return;
-    const timer = window.setTimeout(() => setStatus(null), STATUS_AUTO_DISMISS_MS);
+    if (!status || status.kind === "error" || !settings.autoDismissStatus)
+      return;
+    const timer = window.setTimeout(
+      () => setStatus(null),
+      STATUS_AUTO_DISMISS_MS,
+    );
     return () => window.clearTimeout(timer);
   }, [status, settings.autoDismissStatus]);
 
@@ -237,7 +262,8 @@ export default function App() {
       if (busyRef.current) {
         setStatus({
           kind: "info",
-          message: "Opération en cours — impossible d'ouvrir une autre archive.",
+          message:
+            "Opération en cours — impossible d'ouvrir une autre archive.",
         });
         return;
       }
@@ -305,15 +331,17 @@ export default function App() {
   );
 
   const handleCreate = useCallback(
-    async (dest: string, sources: string[]) => {
+    async (dest: string, sources: string[], password: string | null) => {
       const id = beginOperation();
       setBusy(true);
       setStatus(null);
       try {
-        const result = await createZip(id, dest, sources);
+        const result = await createZip(id, dest, sources, password);
         setStatus({
           kind: "success",
-          message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} compressé(s) en ${formatDuration(result.elapsedMs)} → ${dest}`,
+          message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} compressé(s) en ${formatDuration(result.elapsedMs)} → ${dest}${
+            password ? " (chiffrée AES-256)" : ""
+          }`,
         });
         setLastResult(result);
         setCreating(false);
@@ -357,6 +385,10 @@ export default function App() {
     if (Array.isArray(picked) && picked.length > 0) {
       setSources(picked);
       setCreating(true);
+      // Nouvelle session de création : saisie de mot de passe réinitialisée.
+      setEncryptionEnabled(false);
+      setCreatePassword("");
+      setCreatePasswordConfirm("");
     }
   }, []);
 
@@ -366,7 +398,9 @@ export default function App() {
     const picked = await open({
       multiple: true,
       directory,
-      ...(directory ? {} : { filters: [{ name: "Tous les fichiers", extensions: ["*"] }] }),
+      ...(directory
+        ? {}
+        : { filters: [{ name: "Tous les fichiers", extensions: ["*"] }] }),
     });
     if (Array.isArray(picked) && picked.length > 0) {
       setSources((prev) => [...new Set([...prev, ...picked])]);
@@ -380,22 +414,51 @@ export default function App() {
     // Extraction échouée : on rejoue avec le mot de passe saisi ; sinon,
     // on relance le listing.
     if (pendingExtract) {
-      void handleExtract(pendingExtract.destDir, password, pendingExtract.selection);
+      void handleExtract(
+        pendingExtract.destDir,
+        password,
+        pendingExtract.selection,
+      );
     } else {
       void openArchive(pendingPath, password);
     }
-  }, [pendingPath, pendingExtract, pendingPassword, openArchive, handleExtract]);
+  }, [
+    pendingPath,
+    pendingExtract,
+    pendingPassword,
+    openArchive,
+    handleExtract,
+  ]);
 
   const pickSavePath = useCallback(
     async (sources: string[]) => {
+      // Le mot de passe est validé avant même le choix de l'emplacement.
+      const password = effectiveCreatePassword(
+        encryptionEnabled,
+        createPassword,
+        createPasswordConfirm,
+      );
+      if (encryptionEnabled && password === null) {
+        setStatus({
+          kind: "error",
+          message: createPwdError ?? "Mot de passe invalide.",
+        });
+        return;
+      }
       const dest = await save({
         filters: [{ name: "Archive ZIP", extensions: ["zip"] }],
       });
       if (typeof dest === "string" && dest.length > 0) {
-        await handleCreate(dest, sources);
+        await handleCreate(dest, sources, password);
       }
     },
-    [handleCreate],
+    [
+      handleCreate,
+      encryptionEnabled,
+      createPassword,
+      createPasswordConfirm,
+      createPwdError,
+    ],
   );
 
   // Raccourcis clavier : Ctrl+O ouvrir, Ctrl+N nouvelle archive.
@@ -478,18 +541,11 @@ export default function App() {
           <button onClick={() => void chooseArchive()} disabled={busy}>
             Ouvrir une archive…
           </button>
-          <button
-            onClick={() => void pickCreateFiles()}
-            disabled={busy}
-          >
+          <button onClick={() => void pickCreateFiles()} disabled={busy}>
             Nouvelle archive…
           </button>
           {archive && (
-            <button
-              className="ghost"
-              onClick={closeArchive}
-              disabled={busy}
-            >
+            <button className="ghost" onClick={closeArchive} disabled={busy}>
               {confirmClose ? "Confirmer ?" : "Fermer"}
             </button>
           )}
@@ -576,10 +632,17 @@ export default function App() {
           <CreatePanel
             busy={busy}
             sources={sources}
+            encryptionEnabled={encryptionEnabled}
+            password={createPassword}
+            passwordConfirm={createPasswordConfirm}
+            passwordError={createPwdError}
             onCancel={() => setCreating(false)}
             onCreate={() => void pickSavePath(sources)}
             onAddFiles={() => void addCreateSources(false)}
             onAddDir={() => void addCreateSources(true)}
+            onToggleEncryption={setEncryptionEnabled}
+            onPasswordChange={setCreatePassword}
+            onPasswordConfirmChange={setCreatePasswordConfirm}
           />
         ) : archive ? (
           <ArchiveView

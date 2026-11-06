@@ -12,7 +12,14 @@ use std::{
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use zip::{result::ZipError, write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
+use zip::{
+    result::ZipError, write::SimpleFileOptions, AesMode, CompressionMethod, ZipArchive, ZipWriter,
+};
+
+/// Options d'écriture d'une entrée ZIP. Le paramètre de durée de vie porte
+/// l'emprunt du mot de passe AES (`with_aes_encryption` emprunte la
+/// chaîne) ; sans mot de passe, l'alias dégénère en `SimpleFileOptions`.
+type EntryOptions<'p> = zip::write::FileOptions<'p, 'static, ()>;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -756,7 +763,7 @@ fn compress_one(
     stop: &AtomicBool,
     name: &str,
     path: &Path,
-    options: SimpleFileOptions,
+    options: EntryOptions<'_>,
 ) -> CommandResult<(u64, zip::write::PreparedZipFile)> {
     ctx.check()?;
     let mut file = File::open(path).map_err(CommandError::failed)?;
@@ -789,7 +796,7 @@ fn compress_worker(
     files: &[(String, PathBuf)],
     next: &AtomicUsize,
     stop: &AtomicBool,
-    options: SimpleFileOptions,
+    options: EntryOptions<'_>,
     tx: mpsc::SyncSender<CompressedFile>,
 ) {
     loop {
@@ -855,12 +862,12 @@ fn map_zip_err(error: ZipError, name: &str) -> CommandError {
 /// l'ordre du parcours) et collecte les fichiers à compresser.
 fn collect_zip_plan<W: Write + io::Seek>(
     zip: &mut ZipWriter<W>,
-    options: SimpleFileOptions,
+    options: EntryOptions<'_>,
     sources: &[PathBuf],
 ) -> CommandResult<Vec<(String, PathBuf)>> {
     fn walk_dir<W: Write + io::Seek>(
         zip: &mut ZipWriter<W>,
-        options: SimpleFileOptions,
+        options: EntryOptions<'_>,
         prefix: &str,
         dir: &Path,
         files: &mut Vec<(String, PathBuf)>,
@@ -911,7 +918,7 @@ fn compress_and_append<W: Write + io::Seek>(
     zip: &mut ZipWriter<W>,
     small: &[(String, PathBuf)],
     big: &[(String, PathBuf)],
-    options: SimpleFileOptions,
+    options: EntryOptions<'_>,
     result: &mut OperationResult,
 ) -> CommandResult<()> {
     let total = (small.len() + big.len()) as u64;
@@ -999,6 +1006,7 @@ async fn create_zip(
     id: String,
     dest: String,
     sources: Vec<String>,
+    password: Option<String>,
 ) -> CommandResult<OperationResult> {
     let registry = registry.inner().clone();
     registry.begin(&id);
@@ -1008,31 +1016,51 @@ async fn create_zip(
     let task = tauri::async_runtime::spawn_blocking(move || {
         let dest = PathBuf::from(&dest);
         let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
-        create_zip_inner(Some(&app), Some(&task_registry), &task_id, &dest, &sources)
+        let password = normalize_password(&password);
+        create_zip_inner(
+            Some(&app),
+            Some(&task_registry),
+            &task_id,
+            &dest,
+            &sources,
+            password,
+        )
     });
     let result = task.await.map_err(CommandError::failed);
     registry.end(&id);
     result?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_zip_inner(
     app: Option<&AppHandle>,
     registry: Option<&OperationRegistry>,
     id: &str,
     dest: &Path,
     sources: &[PathBuf],
+    password: Option<&str>,
 ) -> CommandResult<OperationResult> {
-    create_zip_with_limit(app, registry, id, dest, sources, PARALLEL_MAX_FILE_SIZE)
+    create_zip_with_limit(
+        app,
+        registry,
+        id,
+        dest,
+        sources,
+        password,
+        PARALLEL_MAX_FILE_SIZE,
+    )
 }
 
 /// `parallel_max_file` : taille limite des fichiers passés au pool ; les
 /// fichiers plus gros sont compressés en flux (paramétrable pour les tests).
+#[allow(clippy::too_many_arguments)]
 fn create_zip_with_limit(
     app: Option<&AppHandle>,
     registry: Option<&OperationRegistry>,
     id: &str,
     dest: &Path,
     sources: &[PathBuf],
+    password: Option<&str>,
     parallel_max_file: u64,
 ) -> CommandResult<OperationResult> {
     if sources.is_empty() {
@@ -1057,14 +1085,23 @@ fn create_zip_with_limit(
     let start = std::time::Instant::now();
     let file = File::create(dest).map_err(CommandError::failed)?;
     let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    // AES-256 exclusivement (ZipCrypto, cassable, n'est jamais employé).
+    let base = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let options: EntryOptions = match password {
+        Some(password) => base.with_aes_encryption(AesMode::Aes256, password),
+        None => base,
+    };
     // Les dossiers sont écrits pendant le parcours ; les fichiers sont
     // répartis entre le pool parallèle et le flux séquentiel.
     let outcome = collect_zip_plan(&mut zip, options, sources).and_then(|files| {
         let mut small = Vec::new();
         let mut big = Vec::new();
         for (name, path) in files {
-            let is_big = fs::metadata(&path).is_ok_and(|m| m.len() > parallel_max_file);
+            // `ZipFileBuilder` (pool parallèle) refuse les options
+            // chiffrées : une création protégée passe intégralement en
+            // flux séquentiel via `start_file`.
+            let is_big = password.is_some()
+                || fs::metadata(&path).is_ok_and(|m| m.len() > parallel_max_file);
             if is_big {
                 big.push((name, path));
             } else {
@@ -1203,7 +1240,7 @@ mod tests {
         }
         let archive = root.join("test.zip");
 
-        let created = create_zip_inner(None, None, "", &archive, &[source_dir.clone()]).unwrap();
+        let created = create_zip_inner(None, None, "", &archive, &[source_dir.clone()], None).unwrap();
         assert_eq!(created.files, 50);
         // « contenu 0 »…« contenu 49 » : 10 fichiers de 9 octets + 40 de 10.
         assert_eq!(created.bytes, 10 * 9 + 40 * 10);
@@ -1238,7 +1275,7 @@ mod tests {
         let archive = root.join("test.zip");
 
         let created =
-            create_zip_with_limit(None, None, "", &archive, &[source_dir.clone()], 1).unwrap();
+            create_zip_with_limit(None, None, "", &archive, &[source_dir.clone()], None, 1).unwrap();
         assert_eq!(created.files, 2);
 
         let out = root.join("out");
@@ -1261,7 +1298,7 @@ mod tests {
         write(&source_dir.join("sous-dossier/b.txt"), "contenu B");
         let archive = root.join("test.zip");
 
-        let created = create_zip_inner(None, None, "", &archive, &[source_dir.clone()]).unwrap();
+        let created = create_zip_inner(None, None, "", &archive, &[source_dir.clone()], None).unwrap();
         assert_eq!(created.files, 2);
 
         let entries = list_archive_inner(&archive, None).unwrap();
@@ -1285,6 +1322,55 @@ mod tests {
         extract(&archive, &out2, None, Some(&selection(&["sources/sous-dossier/b.txt"]))).unwrap();
         assert!(out2.join("sources/sous-dossier/b.txt").is_file());
         assert!(!out2.join("sources/a.txt").exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn roundtrip_zip_chiffre_aes256() {
+        let root = temp_root("zip-crypt");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu secret");
+        write(&source_dir.join("sous/b.txt"), "contenu également secret");
+        let archive = root.join("secret.zip");
+        let password = "mot-de-passe-secret";
+
+        let created =
+            create_zip_inner(None, None, "", &archive, &[source_dir.clone()], Some(password))
+                .unwrap();
+        assert_eq!(created.files, 2);
+
+        // Le listing (en-têtes seuls) reste possible sans mot de passe.
+        let entries = list_archive_inner(&archive, None).unwrap();
+        assert_eq!(entries.iter().filter(|e| !e.is_dir).count(), 2);
+        // Les fichiers sont bien annoncés chiffrés (les entrées de
+        // dossier n'embarquent aucune donnée et restent en clair).
+        let file = File::open(&archive).unwrap();
+        let mut zip = ZipArchive::new(file).unwrap();
+        for index in 0..zip.len() {
+            let header = zip.by_index_raw(index).unwrap();
+            assert!(header.is_dir() || header.encrypted());
+        }
+
+        // Extraction sans mot de passe : échec typé.
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let error = extract(&archive, &out, None, None).unwrap_err();
+        assert!(matches!(error, CommandError::PasswordRequired { .. }));
+        assert!(!out.join("sources/a.txt").exists());
+
+        // Extraction avec un mauvais mot de passe : échec typé.
+        let error = extract(&archive, &out, Some("mauvais"), None).unwrap_err();
+        assert!(matches!(error, CommandError::PasswordRequired { .. }));
+        assert!(!out.join("sources/a.txt").exists());
+
+        // Extraction avec le bon mot de passe : round-trip complet.
+        let extracted = extract(&archive, &out, Some(password), None).unwrap();
+        assert_eq!(extracted.files, 2);
+        assert_eq!(
+            fs::read_to_string(out.join("sources/a.txt")).unwrap(),
+            "contenu secret"
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -1345,7 +1431,7 @@ mod tests {
         write(&source_dir.join("a.txt"), "contenu A");
         let dest = source_dir.join("auto.zip");
 
-        let error = create_zip_inner(None, None, "", &dest, &[source_dir.clone()]).unwrap_err();
+        let error = create_zip_inner(None, None, "", &dest, &[source_dir.clone()], None).unwrap_err();
         assert!(error.to_string().contains("dossier source"));
         assert!(!dest.exists());
 
@@ -1414,7 +1500,7 @@ mod tests {
         write(&source_dir.join("a.txt"), "contenu A");
         write(&source_dir.join("b.txt"), "contenu B");
         let archive = root.join("test.zip");
-        create_zip_inner(None, None, "", &archive, &[source_dir]).unwrap();
+        create_zip_inner(None, None, "", &archive, &[source_dir], None).unwrap();
 
         let registry = OperationRegistry::default();
         registry.begin("op-1");
@@ -1458,7 +1544,8 @@ mod tests {
         registry.begin("op-2");
         registry.cancel("op-2");
         let error =
-            create_zip_inner(None, Some(&registry), "op-2", &archive, &[source_dir]).unwrap_err();
+            create_zip_inner(None, Some(&registry), "op-2", &archive, &[source_dir], None)
+                .unwrap_err();
         assert!(matches!(error, CommandError::Cancelled { .. }));
         assert!(!archive.exists());
 

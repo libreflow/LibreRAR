@@ -163,7 +163,12 @@ body::after {
 .busy-sweep {
   height: 100%;
   background-repeat: no-repeat;
-  background-image: linear-gradient(90deg, transparent, var(--gold), transparent);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    var(--gold),
+    transparent
+  );
   background-size: 40% 100%;
   animation: busy-sweep 1.1s linear infinite;
 }
@@ -699,6 +704,35 @@ input:focus {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: auto;
+}
+
+.create-encryption {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.create-encryption-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+}
+
+.create-password-fields {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.create-password-fields input {
+  width: 200px;
+}
+
+.create-password-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 14px;
 }
 
 .password-prompt {

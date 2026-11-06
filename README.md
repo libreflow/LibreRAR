@@ -11,18 +11,19 @@ français.
 - **Ouvrir et explorer** : RAR (lecture), ZIP, JAR et 7z
 - **Extraire** : archive complète ou sélection d'entrées, avec mot de passe
   (ZipCrypto/AES pour ZIP, RAR, 7z AES-256)
-- **Créer** : archives ZIP (fichiers et dossiers, récursif, compression Deflate)
+- **Créer** : archives ZIP (fichiers et dossiers, récursif, compression Deflate),
+  avec mot de passe optionnel (chiffrement AES-256 — jamais ZipCrypto)
 - **Glisser-déposer** d'une archive sur la fenêtre pour l'ouvrir
 - **Sécurité** : refus des chemins malveillants (« zip-slip ») à l'extraction
 
-> La *création* d'archives RAR n'est pas possible : le format RAR est
+> La _création_ d'archives RAR n'est pas possible : le format RAR est
 > propriétaire. La lecture s'appuie sur le code source officiel UnRAR
 > (gratuiciel). Les formats entièrement libres (ZIP, 7z) sont lisibles **et**
 > modifiables.
 
 ## Captures d'écran
 
-*(à venir)*
+_(à venir)_
 
 ## Installation
 
@@ -70,11 +71,11 @@ Les installateurs sont générés dans `src-tauri/target/release/bundle/`.
 
 Formats gérés par le backend :
 
-| Format | Lecture | Extraction | Création | Crate |
-|--------|---------|-------------|----------|-------|
-| ZIP/JAR | ✅ | ✅ (sélective) | ✅ | `zip` |
-| RAR | ✅ | ✅ (sélective) | ❌ (propriétaire) | `unrar` |
-| 7z | ✅ | ✅ (sélective) | ❌ | `sevenz-rust` |
+| Format  | Lecture | Extraction     | Création          | Crate         |
+| ------- | ------- | -------------- | ----------------- | ------------- |
+| ZIP/JAR | ✅      | ✅ (sélective) | ✅                | `zip`         |
+| RAR     | ✅      | ✅ (sélective) | ❌ (propriétaire) | `unrar`       |
+| 7z      | ✅      | ✅ (sélective) | ❌                | `sevenz-rust` |
 
 ## Licence
 

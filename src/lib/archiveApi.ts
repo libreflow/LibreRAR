@@ -75,8 +75,9 @@ export function createZip(
   id: string,
   dest: string,
   sources: string[],
+  password: string | null = null,
 ): Promise<OperationResult> {
-  return invoke<OperationResult>("create_zip", { id, dest, sources });
+  return invoke<OperationResult>("create_zip", { id, dest, sources, password });
 }
 
 /** Demande l'annulation de l'opération identifiée par `id`. */
