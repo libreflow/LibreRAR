@@ -9,6 +9,12 @@ export function useModalDialog(onClose: () => void) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // Mémorise l'élément qui avait le focus : il sera restitué à la
+    // fermeture (le lecteur d'écran ne reste pas perdu sur <body>).
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     dialogRef.current?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -33,7 +39,10 @@ export function useModalDialog(onClose: () => void) {
     };
 
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
   }, [onClose]);
 
   return dialogRef;

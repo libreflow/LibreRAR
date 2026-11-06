@@ -344,7 +344,7 @@ export default function ArchiveView({
                 )}
               </button>
             </span>
-            <span className="entry-name" role="cell">
+            <span className="entry-name" role="cell" title={entry.path}>
               {entry.isDir ? <FolderIcon /> : <FileIcon />}{" "}
               {entryBaseName(entry.path)}
             </span>

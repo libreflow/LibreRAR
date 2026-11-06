@@ -74,44 +74,48 @@ export default function CreatePanel({
           </label>
         ))}
       </fieldset>
-      <div className="create-encryption">
-        <label className="create-encryption-toggle">
-          <input
-            type="checkbox"
-            checked={encryptionEnabled}
-            disabled={busy}
-            onChange={(e) => onToggleEncryption(e.target.checked)}
-          />
-          Protéger par un mot de passe (AES-256)
-        </label>
-        {encryptionEnabled && (
-          <div className="create-password-fields">
+      {/* TAR (gz/zst) n'offre aucun chiffrement : le bloc mot de passe est
+          masqué pour ne pas laisser croire à une archive protégée. */}
+      {(format === "zip" || format === "sevenz") && (
+        <div className="create-encryption">
+          <label className="create-encryption-toggle">
             <input
-              type="password"
-              placeholder="Mot de passe"
-              value={password}
+              type="checkbox"
+              checked={encryptionEnabled}
               disabled={busy}
-              autoComplete="new-password"
-              aria-label="Mot de passe de l'archive"
-              onChange={(e) => onPasswordChange(e.target.value)}
+              onChange={(e) => onToggleEncryption(e.target.checked)}
             />
-            <input
-              type="password"
-              placeholder="Confirmation"
-              value={passwordConfirm}
-              disabled={busy}
-              autoComplete="new-password"
-              aria-label="Confirmation du mot de passe"
-              onChange={(e) => onPasswordConfirmChange(e.target.value)}
-            />
-          </div>
-        )}
-        {encryptionEnabled && passwordError && (
-          <p className="create-password-error" role="alert">
-            {passwordError}
-          </p>
-        )}
-      </div>
+            Protéger par un mot de passe (AES-256)
+          </label>
+          {encryptionEnabled && (
+            <div className="create-password-fields">
+              <input
+                type="password"
+                placeholder="Mot de passe"
+                value={password}
+                disabled={busy}
+                autoComplete="new-password"
+                aria-label="Mot de passe de l'archive"
+                onChange={(e) => onPasswordChange(e.target.value)}
+              />
+              <input
+                type="password"
+                placeholder="Confirmation"
+                value={passwordConfirm}
+                disabled={busy}
+                autoComplete="new-password"
+                aria-label="Confirmation du mot de passe"
+                onChange={(e) => onPasswordConfirmChange(e.target.value)}
+              />
+            </div>
+          )}
+          {encryptionEnabled && passwordError && (
+            <p className="create-password-error" role="alert">
+              {passwordError}
+            </p>
+          )}
+        </div>
+      )}
       <div className="create-actions">
         <button className="ghost" onClick={onCancel} disabled={busy}>
           Annuler

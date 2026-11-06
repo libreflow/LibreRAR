@@ -107,6 +107,19 @@ export default function App() {
     createPassword,
     createPasswordConfirm,
   );
+
+  // Le TAR (gz/zst) ne propose aucun chiffrement : si l'utilisateur avait
+  // activé la protection pour un autre format, on la désactive au moment
+  // du changement — jamais d'archive créée en clair en croyant qu'elle
+  // est protégée.
+  const changeCreateFormat = useCallback((format: CreateFormat) => {
+    setCreateFormat(format);
+    if (format === "targz" || format === "tarzst") {
+      setEncryptionEnabled(false);
+      setCreatePassword("");
+      setCreatePasswordConfirm("");
+    }
+  }, []);
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Découpe en volumes : modale de choix de la taille des parties.
@@ -384,17 +397,21 @@ export default function App() {
       const id = beginOperation();
       setBusy(true);
       setStatus(null);
+      // Le TAR ne sait pas chiffrer : le mot de passe éventuel est
+      // explicitement ignoré, jamais silencieusement.
+      const effective =
+        format === "targz" || format === "tarzst" ? null : password;
       try {
         const result =
           format === "sevenz"
-            ? await createSevenz(id, dest, sources, password)
+            ? await createSevenz(id, dest, sources, effective)
             : format === "targz" || format === "tarzst"
               ? await createTar(id, dest, sources, format)
-              : await createZip(id, dest, sources, password);
+              : await createZip(id, dest, sources, effective);
         setStatus({
           kind: "success",
           message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} compressé(s) en ${formatDuration(result.elapsedMs)} → ${dest}${
-            password ? " (chiffrée AES-256)" : ""
+            effective ? " (chiffrée AES-256)" : ""
           }`,
         });
         setLastResult(result);
@@ -857,6 +874,8 @@ export default function App() {
           <input
             type="password"
             placeholder="Mot de passe"
+            // Focus immédiat : le prompt n'apparaît que pour saisir.
+            autoFocus
             value={pendingPassword}
             onChange={(e) => setPendingPassword(e.target.value)}
             aria-label="Mot de passe de l'archive"
@@ -894,7 +913,7 @@ export default function App() {
             onCreate={() => void pickSavePath(sources)}
             onAddFiles={() => void addCreateSources(false)}
             onAddDir={() => void addCreateSources(true)}
-            onFormatChange={setCreateFormat}
+            onFormatChange={changeCreateFormat}
             onToggleEncryption={setEncryptionEnabled}
             onPasswordChange={setCreatePassword}
             onPasswordConfirmChange={setCreatePasswordConfirm}
