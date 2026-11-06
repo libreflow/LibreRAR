@@ -1381,11 +1381,21 @@ fn compress_and_append<W: Write + io::Seek>(
     });
     outcome?;
 
-    // Gros fichiers : compression en flux, séquentielle.
+    // Gros fichiers : compression en flux, séquentielle. Au-delà de la
+    // limite zip32 (32 bits), l'option zip64 (`large_file`) est requise —
+    // sans elle la crate zip échoue en cours d'écriture.
     for (name, path) in big {
         ctx.check()?;
+        let is_large = fs::metadata(&path)
+            .map(|m| m.len() > u32::MAX as u64)
+            .unwrap_or(false);
+        let entry_options = if is_large {
+            options.large_file(true)
+        } else {
+            options
+        };
         let mut file = File::open(path).map_err(CommandError::failed)?;
-        zip.start_file(name, options)
+        zip.start_file(name, entry_options)
             .map_err(|e| map_zip_err(e, name))?;
         let mut buffer = vec![0u8; 128 * 1024];
         let mut bytes = 0u64;

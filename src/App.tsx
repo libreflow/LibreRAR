@@ -35,6 +35,7 @@ import {
   createPasswordError,
   effectiveCreatePassword,
 } from "./lib/createPassword";
+import { ensureCreateExtension } from "./lib/createExtension";
 import { loadSettings, saveSettings, type AppSettings } from "./lib/settings";
 import { startChiptune } from "./lib/chiptune";
 import DropZone from "./components/DropZone";
@@ -684,7 +685,10 @@ export default function App() {
               : [{ name: "Archive ZIP", extensions: ["zip"] }];
       const dest = await save({ filters });
       if (typeof dest === "string" && dest.length > 0) {
-        await handleCreate(dest, sources, password, createFormat);
+        // Suffixe conforme au format : « x.gz » seul serait illisible à
+        // l'ouverture (seuls tar.gz/tgz sont reconnus).
+        const normalized = ensureCreateExtension(dest, createFormat);
+        await handleCreate(normalized, sources, password, createFormat);
       }
     },
     [
