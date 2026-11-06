@@ -31,6 +31,8 @@ tar = "0.4.45"
 flate2 = "1"
 xz2 = "0.1"
 zstd = "0.13"
+base64 = "0.22"
+sha2 = "0.10"
 tauri-plugin-opener = "2.7.2"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

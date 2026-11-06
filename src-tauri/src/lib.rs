@@ -11,6 +11,7 @@ use std::{
 };
 
 use serde::Serialize;
+use base64::Engine as _;
 use tauri::{AppHandle, Emitter};
 use zip::{
     result::ZipError, write::SimpleFileOptions, AesMode, CompressionMethod, ZipArchive, ZipWriter,
@@ -1804,6 +1805,325 @@ async fn create_tar(
 }
 
 // ---------------------------------------------------------------------------
+// Aperçu avant extraction
+// ---------------------------------------------------------------------------
+
+/// Taille maximale d'une entrée prévisualisable.
+const PREVIEW_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewPayload {
+    kind: &'static str,
+    mime: &'static str,
+    /// Texte pour « text », base64 pour « image ».
+    content: String,
+    truncated: bool,
+}
+
+/// Extensions reconnues pour l'aperçu (texte et images).
+fn preview_kind(name: &str) -> Option<(&'static str, &'static str)> {
+    let ext = name
+        .rsplit('.')
+        .next()
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "txt" | "md" | "json" | "xml" | "csv" | "js" | "ts" | "tsx" | "jsx" | "py" | "rs"
+        | "toml" | "yml" | "yaml" | "ini" | "cfg" | "conf" | "log" | "html" | "css" | "c"
+        | "h" | "cpp" | "hpp" | "java" | "go" | "sh" | "bat" | "sql" => {
+            Some(("text", "text/plain; charset=utf-8"))
+        }
+        "png" => Some(("image", "image/png")),
+        "jpg" | "jpeg" => Some(("image", "image/jpeg")),
+        "gif" => Some(("image", "image/gif")),
+        "webp" => Some(("image", "image/webp")),
+        "bmp" => Some(("image", "image/bmp")),
+        "ico" => Some(("image", "image/x-icon")),
+        "svg" => Some(("image", "image/svg+xml")),
+        _ => None,
+    }
+}
+
+/// Lit le contenu d'une entrée en mémoire (cap appliqué avant lecture).
+fn entry_bytes_zip(
+    path: &Path,
+    entry_name: &str,
+    password: Option<&str>,
+    cap: u64,
+) -> CommandResult<Vec<u8>> {
+    let file = File::open(path).map_err(CommandError::failed)?;
+    let mut archive = ZipArchive::new(file).map_err(zip_err)?;
+    for index in 0..archive.len() {
+        let header = archive.by_index_raw(index).map_err(zip_err)?;
+        let name = header.name().map_err(zip_err)?.replace('\\', "/");
+        let size = header.size();
+        let encrypted = header.encrypted();
+        drop(header);
+        if entry_matches(&name, entry_name) {
+            if size > cap {
+                return Err(too_large(size));
+            }
+            let mut file_bytes = Vec::with_capacity(size as usize);
+            let mut entry = if encrypted {
+                let password = password.ok_or_else(CommandError::password_required)?;
+                archive
+                    .by_index_decrypt(index, password.as_bytes())
+                    .map_err(zip_err)?
+            } else {
+                archive.by_index(index).map_err(zip_err)?
+            };
+            entry
+                .read_to_end(&mut file_bytes)
+                .map_err(CommandError::failed)?;
+            return Ok(file_bytes);
+        }
+    }
+    Err(not_found(entry_name))
+}
+
+fn entry_bytes_rar(path: &Path, entry_name: &str, password: Option<&str>, cap: u64) -> CommandResult<Vec<u8>> {
+    let archive = match password {
+        Some(password) => unrar::Archive::with_password(path, password),
+        None => unrar::Archive::new(path),
+    };
+    let mut open = archive.open_for_processing().map_err(rar_err)?;
+    loop {
+        let before_file = match open.read_header().map_err(rar_err)? {
+            Some(next) => next,
+            None => return Err(not_found(entry_name)),
+        };
+        let header = before_file.entry();
+        let name = header.filename.to_string_lossy().replace('\\', "/");
+        if entry_matches(&name, entry_name) {
+            let size = header.unpacked_size;
+            if size > cap {
+                return Err(too_large(size));
+            }
+            let (bytes, _) = before_file.read().map_err(rar_err)?;
+            return Ok(bytes);
+        }
+        open = before_file.skip().map_err(rar_err)?;
+    }
+}
+
+fn entry_bytes_sevenz(
+    path: &Path,
+    entry_name: &str,
+    password: Option<&str>,
+    cap: u64,
+) -> CommandResult<Vec<u8>> {
+    let password = match password {
+        Some(p) => sevenz_rust::Password::from(p),
+        None => sevenz_rust::Password::empty(),
+    };
+    let mut reader = sevenz_rust::SevenZReader::open(path, password).map_err(sevenz_err)?;
+    let mut outcome: Option<CommandResult<Vec<u8>>> = None;
+    reader
+        .for_each_entries(|entry, entry_reader| {
+            if outcome.is_some() {
+                return Ok(false);
+            }
+            if entry_matches(entry.name.as_str(), entry_name) {
+                if entry.size > cap {
+                    outcome = Some(Err(too_large(entry.size)));
+                    return Ok(false);
+                }
+                let mut bytes = Vec::with_capacity(entry.size as usize);
+                match io::copy(entry_reader, &mut bytes) {
+                    Ok(_) => outcome = Some(Ok(bytes)),
+                    Err(e) => outcome = Some(Err(CommandError::failed(e.to_string()))),
+                }
+                // Entrée trouvée : arrêt du parcours.
+                Ok(false)
+            } else {
+                // Il faut consommer le flux (archives solides).
+                match io::copy(entry_reader, &mut io::sink()) {
+                    Ok(_) => Ok(true),
+                    Err(e) => {
+                        outcome = Some(Err(CommandError::failed(e.to_string())));
+                        Ok(false)
+                    }
+                }
+            }
+        })
+        .map_err(sevenz_err)?;
+    outcome.unwrap_or_else(|| Err(not_found(entry_name)))
+}
+
+fn entry_bytes_tar(path: &Path, entry_name: &str, variant: &str, cap: u64) -> CommandResult<Vec<u8>> {
+    let reader = decode_tar_stream(path, variant)?;
+    let mut archive = tar::Archive::new(reader);
+    for entry in archive.entries().map_err(CommandError::failed)? {
+        let mut entry = entry.map_err(CommandError::failed)?;
+        let name = entry
+            .path()
+            .map_err(CommandError::failed)?
+            .to_string_lossy()
+            .to_string();
+        let Some(name) = tar_entry_name(&name) else {
+            continue;
+        };
+        if entry_matches(&name, entry_name) {
+            let size = entry.header().size().map_err(CommandError::failed)?;
+            if size > cap {
+                return Err(too_large(size));
+            }
+            let mut bytes = Vec::with_capacity(size as usize);
+            entry.read_to_end(&mut bytes).map_err(CommandError::failed)?;
+            return Ok(bytes);
+        }
+    }
+    Err(not_found(entry_name))
+}
+
+/// Vrai si un nom d'entrée correspond à l'entrée voulue : comparaison
+/// directe (slash final ignoré) ou suffixe après un séparateur.
+fn entry_matches(name: &str, wanted: &str) -> bool {
+    let name = name.trim_end_matches('/');
+    let wanted = wanted.trim_end_matches('/');
+    name.eq_ignore_ascii_case(wanted) || name.ends_with(&format!("/{wanted}"))
+}
+
+fn too_large(size: u64) -> CommandError {
+    CommandError::failed(format!(
+        "Entrée trop volumineuse pour un aperçu : {size} octets (max {PREVIEW_MAX_BYTES})."
+    ))
+}
+
+fn not_found(entry_name: &str) -> CommandError {
+    CommandError::failed(format!("Entrée introuvable : {entry_name}"))
+}
+
+#[tauri::command]
+async fn preview_entry(
+    path: String,
+    entry_name: String,
+    password: Option<String>,
+) -> CommandResult<PreviewPayload> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(&path);
+        let password = normalize_password(&password);
+        let (path, _assembled) = resolve_archive_path(&path)?;
+        preview_entry_inner(&path, &entry_name, password)
+    })
+    .await
+    .map_err(CommandError::failed)?
+}
+
+fn preview_entry_inner(
+    path: &Path,
+    entry_name: &str,
+    password: Option<&str>,
+) -> CommandResult<PreviewPayload> {
+    if !path.is_file() {
+        return Err(CommandError::failed(format!(
+            "Fichier introuvable : {}",
+            path.display()
+        )));
+    }
+    let Some((kind, mime)) = preview_kind(entry_name) else {
+        return Err(CommandError::failed(
+            "Aperçu non disponible pour ce type de fichier.",
+        ));
+    };
+    let format = detect_format(path)?;
+    let bytes = match format {
+        "zip" => entry_bytes_zip(path, entry_name, password, PREVIEW_MAX_BYTES)?,
+        "rar" => entry_bytes_rar(path, entry_name, password, PREVIEW_MAX_BYTES)?,
+        "sevenz" => entry_bytes_sevenz(path, entry_name, password, PREVIEW_MAX_BYTES)?,
+        variant => entry_bytes_tar(path, entry_name, variant, PREVIEW_MAX_BYTES)?,
+    };
+    let content = match kind {
+        "text" => String::from_utf8_lossy(&bytes).into_owned(),
+        // Images : base64, consommé par le frontend en data URL.
+        _ => base64::engine::general_purpose::STANDARD.encode(&bytes),
+    };
+    Ok(PreviewPayload {
+        kind,
+        mime,
+        content,
+        truncated: false,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sommes de contrôle (SHA-256)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChecksumResult {
+    checksum: String,
+    bytes: u64,
+    /// Nom du fichier haché (base, sans suffixe de volume).
+    file_name: String,
+}
+
+fn sha256_file(path: &Path) -> CommandResult<(String, u64)> {
+    use sha2::{Digest, Sha256};
+    let mut file = File::open(path).map_err(CommandError::failed)?;
+    let mut hasher = Sha256::new();
+    let bytes = io::copy(&mut file, &mut hasher).map_err(CommandError::failed)?;
+    let checksum: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok((checksum, bytes))
+}
+
+#[tauri::command]
+async fn checksum_archive(path: String) -> CommandResult<ChecksumResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(&path);
+        let (resolved, _assembled) = resolve_archive_path(&path)?;
+        if !resolved.is_file() {
+            return Err(CommandError::failed(format!(
+                "Fichier introuvable : {}",
+                path.display()
+            )));
+        }
+        let (checksum, bytes) = sha256_file(&resolved)?;
+        let file_name = resolved
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(ChecksumResult {
+            checksum,
+            bytes,
+            file_name,
+        })
+    })
+    .await
+    .map_err(CommandError::failed)?
+}
+
+/// Écrit un fichier `.sha256` (« <hash>  <nom> ») à côté de l'archive.
+#[tauri::command]
+async fn export_checksum(path: String, dest: String) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(&path);
+        let dest = PathBuf::from(&dest);
+        if dest.exists() {
+            return Err(CommandError::failed(
+                "Le fichier de destination existe déjà.",
+            ));
+        }
+        let (resolved, _assembled) = resolve_archive_path(&path)?;
+        let (checksum, _) = sha256_file(&resolved)?;
+        let file_name = resolved
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        fs::write(&dest, format!("{checksum}  {file_name}\n")).map_err(CommandError::failed)?;
+        Ok(())
+    })
+    .await
+    .map_err(CommandError::failed)?
+}
+
+// ---------------------------------------------------------------------------
 // Découpage en volumes (.001, .002, …)
 // ---------------------------------------------------------------------------
 
@@ -2056,6 +2376,9 @@ pub fn run() {
             create_tar,
             test_archive,
             split_archive,
+            preview_entry,
+            checksum_archive,
+            export_checksum,
             cancel_operation
         ])
         .run(tauri::generate_context!())
@@ -2870,6 +3193,40 @@ mod tests {
         assert!(!out.join("ok.txt").exists());
         assert!(!root.join("evil.txt").exists());
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn apercu_texte_et_refus_des_types_inconnus() {
+        let root = temp_root("preview");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("note.txt"), "bonjour l'aperçu");
+        write(&source_dir.join("binaire.bin"), "\u{0}\u{1}");
+        let archive = root.join("test.zip");
+        create_zip_inner(None, None, "", &archive, &[source_dir], None).unwrap();
+
+        let preview = preview_entry_inner(&archive, "sources/note.txt", None).unwrap();
+        assert_eq!(preview.kind, "text");
+        assert!(preview.content.contains("bonjour l'aperçu"));
+
+        // Type non prévisualisable : refus clair.
+        let error = preview_entry_inner(&archive, "sources/binaire.bin", None).unwrap_err();
+        assert!(error.to_string().contains("Aperçu non disponible"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn sha256_connu_est_exact() {
+        let root = temp_root("sha");
+        let file = root.join("abc.txt");
+        write(&file, "abc");
+        let (checksum, bytes) = sha256_file(&file).unwrap();
+        assert_eq!(
+            checksum,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(bytes, 3);
         fs::remove_dir_all(&root).unwrap();
     }
 

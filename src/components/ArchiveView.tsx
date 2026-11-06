@@ -5,6 +5,7 @@ import { filterEntries, sortEntriesBy, type SortKey } from "../lib/entries";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  EyeIcon,
   FileIcon,
   FolderIcon,
   LoaderIcon,
@@ -20,6 +21,8 @@ interface ArchiveViewProps {
   onExtract: (password: string | null, selection: string[]) => void;
   onTest: (password: string | null) => void;
   onSplit: () => void;
+  onChecksum: () => void;
+  onPreview: (entryPath: string, password: string | null) => void;
 }
 
 const FORMAT_LABELS: Record<ArchiveFormat, string> = {
@@ -40,6 +43,8 @@ export default function ArchiveView({
   onExtract,
   onTest,
   onSplit,
+  onChecksum,
+  onPreview,
 }: ArchiveViewProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -190,6 +195,13 @@ export default function ArchiveView({
         >
           Découper…
         </button>
+        <button
+          disabled={busy}
+          onClick={onChecksum}
+          title="Calculer la somme SHA-256 de l'archive"
+        >
+          SHA-256
+        </button>
       </div>
 
       <div
@@ -309,6 +321,26 @@ export default function ArchiveView({
               {entry.isDir
                 ? "—"
                 : compressionRatio(entry.size, entry.compressedSize)}
+            </span>
+            <span role="cell" className="cell-preview">
+              {!entry.isDir && (
+                <button
+                  type="button"
+                  className="ghost preview-button"
+                  disabled={busy}
+                  aria-label={`Aperçu de ${entryBaseName(entry.path)}`}
+                  title="Aperçu (texte/images)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPreview(
+                      entry.path,
+                      password.length > 0 ? password : null,
+                    );
+                  }}
+                >
+                  <EyeIcon />
+                </button>
+              )}
             </span>
           </div>
         ))}

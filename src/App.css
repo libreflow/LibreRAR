@@ -772,6 +772,48 @@ input:focus {
   margin-top: 12px;
 }
 
+/* — Aperçu d'entrée — */
+
+.preview-modal {
+  width: min(760px, 92vw);
+}
+
+.preview-text {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--bg-row);
+  border: 2px solid var(--border);
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  margin: 0 auto;
+  image-rendering: pixelated;
+}
+
+.cell-preview {
+  width: 44px;
+}
+
+.preview-button {
+  padding: 2px 6px;
+}
+
+.status-hash {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  max-width: 340px;
+}
+
 .password-prompt {
   margin: 10px 16px;
   padding: 10px 12px;

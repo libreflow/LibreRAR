@@ -139,3 +139,35 @@ export function testArchive(
 ): Promise<OperationResult> {
   return invoke<OperationResult>("test_archive", { id, path, password });
 }
+
+export interface PreviewPayload {
+  kind: "text" | "image";
+  mime: string;
+  content: string;
+  truncated: boolean;
+}
+
+/** Contenu d'une entrée pour aperçu (texte ou image), sans extraction. */
+export function previewEntry(
+  path: string,
+  entryName: string,
+  password: string | null = null,
+): Promise<PreviewPayload> {
+  return invoke<PreviewPayload>("preview_entry", { path, entryName, password });
+}
+
+export interface ChecksumResult {
+  checksum: string;
+  bytes: number;
+  fileName: string;
+}
+
+/** Somme SHA-256 de l'archive (volumes réassemblés au besoin). */
+export function checksumArchive(path: string): Promise<ChecksumResult> {
+  return invoke<ChecksumResult>("checksum_archive", { path });
+}
+
+/** Écrit un fichier `.sha256` à l'emplacement choisi. */
+export function exportChecksum(path: string, dest: string): Promise<void> {
+  return invoke<void>("export_checksum", { path, dest });
+}

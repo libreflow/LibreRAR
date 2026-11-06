@@ -61,8 +61,8 @@ _Objectif : couvrir ce que l'utilisateur télécharge et partage aujourd'hui._
 | --- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | 3.1 | **Lecture TAR / tar.gz / tar.xz / tar.zst** — ✅ fait | Le format des devs (dépôts, npm, releases GitHub) ; crates `tar` + décodeurs stream.                      |
 | 3.2 | **Création tar.gz / tar.zst** — ✅ fait               | Zstandard : standard de fait 2026 (rapide, moderne).                                                      |
-| 3.3 | **Aperçu avant extraction**                           | Ouvrir un fichier texte/image directement depuis l'archive, en lecture seule, sans extraction sur disque. |
-| 3.4 | **Sommes de contrôle**                                | SHA-256/SHA-512 par entrée et sur archive ; export d'un `.sha256`.                                        |
+| 3.3 | **Aperçu avant extraction** — ✅ fait        | Ouvrir un fichier texte/image directement depuis l'archive, en lecture seule, sans extraction sur disque. |
+| 3.4 | **Sommes de contrôle** — ✅ fait (SHA-256 sur archive) | SHA-256/SHA-512 par entrée et sur archive ; export d'un `.sha256` (par entrée : suivi). |
 
 ## Phase 4 — L'avantage que WinRAR n'aura jamais (v1.2+)
 

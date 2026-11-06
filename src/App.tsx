@@ -23,6 +23,9 @@ import {
   listArchive,
   splitArchive,
   testArchive,
+  previewEntry,
+  checksumArchive,
+  exportChecksum,
   type OperationProgress,
 } from "./lib/archiveApi";
 import { isTauri } from "./lib/platform";
@@ -37,6 +40,7 @@ import ArchiveView from "./components/ArchiveView";
 import CreatePanel from "./components/CreatePanel";
 import SettingsPanel from "./components/SettingsPanel";
 import SplitPanel from "./components/SplitPanel";
+import PreviewModal, { type PreviewData } from "./components/PreviewModal";
 import BalatroPopup, { pickPraise } from "./components/BalatroPopup";
 import {
   CircleCheckIcon,
@@ -105,6 +109,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Découpe en volumes : modale de choix de la taille des parties.
   const [splitOpen, setSplitOpen] = useState(false);
+  // Aperçu d'une entrée (texte/image), sans extraction.
+  const [preview, setPreview] = useState<PreviewData | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
   // Archive dont la lecture (ou l'extraction) a échoué : mot de passe
   // probablement requis. `pendingExtract` garde les paramètres d'une
@@ -478,6 +484,83 @@ export default function App() {
     [archive],
   );
 
+  // Aperçu d'une entrée : lecture mémoire côté backend, aucun fichier écrit.
+  const handlePreview = useCallback(
+    async (entryPath: string, password: string | null) => {
+      if (!archive) return;
+      setBusy(true);
+      setStatus(null);
+      try {
+        const payload = await previewEntry(archive.path, entryPath, password);
+        setPreview({
+          entryName: fileNameOf(entryPath),
+          kind: payload.kind,
+          mime: payload.mime,
+          content: payload.content,
+        });
+      } catch (error) {
+        const appError = asAppError(error);
+        setStatus({
+          kind: "error",
+          message: `Aperçu impossible : ${appError.message}`,
+        });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [archive],
+  );
+
+  // Somme SHA-256 de l'archive (volumes réassemblés au besoin).
+  const handleChecksum = useCallback(async () => {
+    if (!archive) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const result = await checksumArchive(archive.path);
+      setStatus({
+        kind: "success",
+        message: `SHA-256 (${formatBytes(result.bytes)}) — ${result.fileName}`,
+        checksum: result.checksum,
+      });
+    } catch (error) {
+      const appError = asAppError(error);
+      setStatus({
+        kind: "error",
+        message: `Échec du calcul : ${appError.message}`,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [archive]);
+
+  // Export du fichier .sha256 à l'emplacement choisi.
+  const handleExportChecksum = useCallback(async () => {
+    if (!archive || !status?.checksum) return;
+    const dest = await save({
+      title: "Exporter la somme SHA-256",
+      defaultPath: `${archive.path}.sha256`,
+      filters: [{ name: "Somme SHA-256", extensions: ["sha256"] }],
+    });
+    if (typeof dest !== "string" || dest.length === 0) return;
+    setBusy(true);
+    try {
+      await exportChecksum(archive.path, dest);
+      setStatus({
+        kind: "success",
+        message: `Somme SHA-256 exportée → ${dest}`,
+      });
+    } catch (error) {
+      const appError = asAppError(error);
+      setStatus({
+        kind: "error",
+        message: `Échec de l'export : ${appError.message}`,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [archive, status]);
+
   const pickExtractDir = useCallback(
     async (password: string | null, selection: string[]) => {
       const destDir = await open({ directory: true, multiple: false });
@@ -696,6 +779,10 @@ export default function App() {
         />
       )}
 
+      {preview && (
+        <PreviewModal preview={preview} onClose={() => setPreview(null)} />
+      )}
+
       {status && (
         <div className={`status status-${status.kind}`} role="status">
           {(() => {
@@ -703,6 +790,25 @@ export default function App() {
             return <StatusIcon className="status-icon" />;
           })()}
           <span className="status-message">{status.message}</span>
+          {status.kind === "success" && status.checksum && (
+            <>
+              <code className="status-hash">{status.checksum}</code>
+              <button
+                className="status-action"
+                onClick={() =>
+                  void navigator.clipboard.writeText(status.checksum ?? "")
+                }
+              >
+                Copier
+              </button>
+              <button
+                className="status-action"
+                onClick={() => void handleExportChecksum()}
+              >
+                Exporter…
+              </button>
+            </>
+          )}
           {status.kind === "success" && extractDest && (
             <button
               className="status-action"
@@ -784,6 +890,10 @@ export default function App() {
             }
             onTest={(password) => void handleTest(password)}
             onSplit={() => setSplitOpen(true)}
+            onChecksum={() => void handleChecksum()}
+            onPreview={(entryPath, password) =>
+              void handlePreview(entryPath, password)
+            }
           />
         ) : (
           <DropZone busy={busy} onPick={() => void chooseArchive()} />

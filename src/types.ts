@@ -23,4 +23,6 @@ export type StatusKind = "info" | "success" | "error";
 export interface Status {
   kind: StatusKind;
   message: string;
+  /** somme SHA-256 affichée avec action « Copier » */
+  checksum?: string;
 }
