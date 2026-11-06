@@ -33,36 +33,36 @@ UI moderne, interface française, légèreté, sécurité IPC testée.
 
 _Objectif : ne rien perdre en migrant depuis WinRAR._
 
-| #   | Fonction                                     | Critères d'acceptation                                                                                     |
-| --- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| 1.1 | **Mot de passe à la création ZIP** — ✅ fait | AES-256 obligatoire (jamais ZipCrypto, cassable) ; tests round-trip chiffré ; refus clear-text par défaut. |
-| 1.2 | **Création 7z** (LZMA2) — ✅ fait            | Via `sevenz-rust` ; choix niveau de compression ; chiffrement AES-256 ; tests round-trip.                  |
-| 1.3 | **Test d'intégrité** (`Test archive`) — ✅ fait | Commande IPC `test_archive` ; 100% des entrées vérifiées (CRC/hash), rapport clair en français.            |
-| 1.4 | **Chiffrement fort à la lecture**            | ZIP AES + RAR + 7z AES-256 (✅ déjà présent — à couvrir de tests réels).                                   |
+| #   | Fonction                                             | Critères d'acceptation                                                                                     |
+| --- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| 1.1 | **Mot de passe à la création ZIP** — ✅ fait         | AES-256 obligatoire (jamais ZipCrypto, cassable) ; tests round-trip chiffré ; refus clear-text par défaut. |
+| 1.2 | **Création 7z** (LZMA2) — ✅ fait                    | Via `sevenz-rust` ; choix niveau de compression ; chiffrement AES-256 ; tests round-trip.                  |
+| 1.3 | **Test d'intégrité** (`Test archive`) — ✅ fait      | Commande IPC `test_archive` ; 100% des entrées vérifiées (CRC/hash), rapport clair en français.            |
+| 1.4 | **Chiffrement fort à la lecture**                    | ZIP AES + RAR + 7z AES-256 (✅ déjà présent — à couvrir de tests réels).                                   |
 | 1.5 | **Vue « détails de compression »** — ✅ préexistante | Ratio, taille économisée par entrée (donnée déjà fournie par le listing).                                  |
 
 ## Phase 2 — Intégration système 2026 (v1.0)
 
 _Objectif : présent là où l'utilisateur clique réellement._
 
-| #   | Fonction                       | Critères d'acceptation                                                                                                                 |
-| --- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| 2.1 | **Menu contextuel Windows 11** | « Extraire ici / Extraire vers… / Ouvrir avec LibreRAR » via le nouveau modèle de menu (packaged app / sparse), sans élévation.        |
-| 2.2 | **Association d'extensions**   | .zip .7z .rar .jar ouvrables par double-clic ; deep links Tauri.                                                                       |
+| #   | Fonction                                                            | Critères d'acceptation                                                                                                          |
+| --- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 2.1 | **Menu contextuel Windows 11**                                      | « Extraire ici / Extraire vers… / Ouvrir avec LibreRAR » via le nouveau modèle de menu (packaged app / sparse), sans élévation. |
+| 2.2 | **Association d'extensions**                                        | .zip .7z .rar .jar ouvrables par double-clic ; deep links Tauri.                                                                |
 | 2.3 | **Découpe de volumes moderne** — ✅ fait (découpe générique `.001`) | Découpe en volumes paramétrables (taille libre), **recollement** à l'ouverture ; indispensable pour partages limités en taille. |
-| 2.4 | **Auto-update silencieuse**    | Plugin Tauri updater signé ; notification non intrusive.                                                                               |
-| 2.5 | **Distribution moderne**       | `winget install librerar` ; package MSIX optionnel ; (pas de release sans validation manuelle `npm run tauri dev`).                    |
+| 2.4 | **Auto-update silencieuse**                                         | Plugin Tauri updater signé ; notification non intrusive.                                                                        |
+| 2.5 | **Distribution moderne**                                            | `winget install librerar` ; package MSIX optionnel ; (pas de release sans validation manuelle `npm run tauri dev`).             |
 
 ## Phase 3 — Formats du monde réel 2026 (v1.1)
 
 _Objectif : couvrir ce que l'utilisateur télécharge et partage aujourd'hui._
 
-| #   | Fonction                                    | Critères d'acceptation                                                                                    |
-| --- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| 3.1 | **Lecture TAR / tar.gz / tar.xz / tar.zst** | Le format des devs (dépôts, npm, releases GitHub) ; crates `tar` + décodeurs stream.                      |
-| 3.2 | **Création tar.gz / tar.zst**               | Zstandard : standard de fait 2026 (rapide, moderne).                                                      |
-| 3.3 | **Aperçu avant extraction**                 | Ouvrir un fichier texte/image directement depuis l'archive, en lecture seule, sans extraction sur disque. |
-| 3.4 | **Sommes de contrôle**                      | SHA-256/SHA-512 par entrée et sur archive ; export d'un `.sha256`.                                        |
+| #   | Fonction                                              | Critères d'acceptation                                                                                    |
+| --- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| 3.1 | **Lecture TAR / tar.gz / tar.xz / tar.zst** — ✅ fait | Le format des devs (dépôts, npm, releases GitHub) ; crates `tar` + décodeurs stream.                      |
+| 3.2 | **Création tar.gz / tar.zst** — ✅ fait               | Zstandard : standard de fait 2026 (rapide, moderne).                                                      |
+| 3.3 | **Aperçu avant extraction**                           | Ouvrir un fichier texte/image directement depuis l'archive, en lecture seule, sans extraction sur disque. |
+| 3.4 | **Sommes de contrôle**                                | SHA-256/SHA-512 par entrée et sur archive ; export d'un `.sha256`.                                        |
 
 ## Phase 4 — L'avantage que WinRAR n'aura jamais (v1.2+)
 

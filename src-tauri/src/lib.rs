@@ -262,7 +262,31 @@ fn is_selected(name: &str, is_dir: bool, selection: &HashSet<String>) -> bool {
     false
 }
 
+/// Variante TAR détectée par le nom de fichier (`.tar`, `.tar.gz`, `.tgz`,
+/// `.tar.xz`, `.txz`, `.tar.zst`, `.tzst`).
+fn tar_variant(file_name: &str) -> Option<&'static str> {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".tar") {
+        Some("tar")
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        Some("targz")
+    } else if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+        Some("tarxz")
+    } else if lower.ends_with(".tar.zst") || lower.ends_with(".tzst") {
+        Some("tarzst")
+    } else {
+        None
+    }
+}
+
 fn detect_format(path: &Path) -> CommandResult<&'static str> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    if let Some(variant) = tar_variant(name) {
+        return Ok(variant);
+    }
     match path
         .extension()
         .and_then(|e| e.to_str())
@@ -273,7 +297,7 @@ fn detect_format(path: &Path) -> CommandResult<&'static str> {
         Some("rar") => Ok("rar"),
         Some("7z") => Ok("sevenz"),
         _ => Err(CommandError::failed(
-            "Format non pris en charge (formats acceptés : zip, rar, 7z)",
+            "Format non pris en charge (formats acceptés : zip, rar, 7z, tar, tar.gz, tar.xz, tar.zst)",
         )),
     }
 }
@@ -409,6 +433,68 @@ fn list_sevenz(path: &Path, password: Option<&str>) -> CommandResult<Vec<Archive
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// TAR (tar, tar.gz, tar.xz, tar.zst)
+// ---------------------------------------------------------------------------
+
+/// Décodeur d'un flux TAR selon la variante détectée.
+fn decode_tar_stream(path: &Path, variant: &str) -> CommandResult<Box<dyn Read>> {
+    let file = File::open(path).map_err(CommandError::failed)?;
+    Ok(match variant {
+        "tar" => Box::new(io::BufReader::new(file)),
+        "targz" => Box::new(flate2::read::GzDecoder::new(file)),
+        "tarxz" => Box::new(xz2::read::XzDecoder::new(file)),
+        "tarzst" => Box::new(
+            zstd::stream::read::Decoder::new(file).map_err(CommandError::failed)?,
+        ),
+        other => return Err(CommandError::failed(format!("Variante TAR inconnue : {other}"))),
+    })
+}
+
+/// Normalise le nom d'une entrée TAR : séparateurs `/`, préfixes `./` et
+/// slashes initiaux retirés ; `None` si le nom est vide (entrée racine).
+fn tar_entry_name(name: &str) -> Option<String> {
+    let mut normalized = name.replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+    let normalized = normalized.trim_start_matches('/');
+    // Entrée racine (« ./ » ou « . ») : rien à extraire.
+    if normalized.is_empty() || normalized == "." {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
+}
+
+fn list_tar(path: &Path, variant: &str) -> CommandResult<Vec<ArchiveEntry>> {
+    let reader = decode_tar_stream(path, variant)?;
+    let mut archive = tar::Archive::new(reader);
+    let mut entries = Vec::new();
+    for entry in archive.entries().map_err(CommandError::failed)? {
+        let entry = entry.map_err(CommandError::failed)?;
+        let Some(path) =
+            tar_entry_name(&entry.path().map_err(CommandError::failed)?.to_string_lossy())
+        else {
+            continue;
+        };
+        let is_dir = entry.header().entry_type().is_dir() || path.ends_with('/');
+        entries.push(ArchiveEntry {
+            path: if is_dir {
+                dir_entry_path(path)
+            } else {
+                path
+            },
+            size: entry.size(),
+            // Flux compressé : la crate tar ne connaît pas la taille
+            // compressée de chaque entrée (comme le RAR).
+            compressed_size: 0,
+            is_dir,
+        });
+    }
+    Ok(entries)
+}
+
 #[tauri::command]
 async fn list_archive(
     path: String,
@@ -438,7 +524,8 @@ fn list_archive_inner(
     match detect_format(path)? {
         "zip" => list_zip(path),
         "rar" => list_rar(path, password),
-        _ => list_sevenz(path, password),
+        "sevenz" => list_sevenz(path, password),
+        variant => list_tar(path, variant), // tar, targz, tarxz, tarzst
     }
 }
 
@@ -639,6 +726,102 @@ fn extract_sevenz(
     Ok(result)
 }
 
+/// Extrait les entrées d'un flux TAR. Le flux est décodé séquentiellement
+/// (pas de taille compressée par entrée) : la progression est comptée
+/// en entrées, sans total global connu d'avance.
+fn extract_tar(
+    ctx: &OpContext,
+    path: &Path,
+    dest_dir: &Path,
+    variant: &str,
+    selection: Option<&HashSet<String>>,
+    written: &mut ExtractedFiles,
+) -> CommandResult<OperationResult> {
+    let reader = decode_tar_stream(path, variant)?;
+    let mut archive = tar::Archive::new(reader);
+    let mut files = 0;
+    let mut bytes = 0;
+    let mut done = 0;
+    for entry in archive.entries().map_err(CommandError::failed)? {
+        ctx.check()?;
+        done += 1;
+        let mut entry = entry.map_err(CommandError::failed)?;
+        let name = entry
+            .path()
+            .map_err(CommandError::failed)?
+            .to_string_lossy()
+            .to_string();
+        ctx.progress(done, 0, &name);
+        let Some(name) = tar_entry_name(&name) else {
+            continue;
+        };
+        let is_dir = entry.header().entry_type().is_dir() || name.ends_with('/');
+        if let Some(selection) = selection {
+            if !is_selected(&name, is_dir, selection) {
+                continue;
+            }
+        }
+        let dest = safe_join(dest_dir, &name)?;
+        if is_dir {
+            fs::create_dir_all(&dest).map_err(CommandError::failed)?;
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(CommandError::failed)?;
+        }
+        let preexisting = dest.exists();
+        let mut out = File::create(&dest).map_err(CommandError::failed)?;
+        io::copy(&mut entry, &mut out).map_err(CommandError::failed)?;
+        out.flush().map_err(CommandError::failed)?;
+        if !preexisting {
+            written.track(&dest);
+        }
+        files += 1;
+        bytes += entry.size();
+    }
+    Ok(OperationResult {
+        files,
+        bytes,
+        elapsed_ms: 0,
+    })
+}
+
+/// Teste un flux TAR : chaque entrée est lue jusqu'au bout (le décodeur
+/// gz/xz/zst valide ses sommes de contrôle en fin de flux compressé).
+fn test_tar(
+    ctx: &OpContext,
+    path: &Path,
+    variant: &str,
+) -> CommandResult<OperationResult> {
+    let reader = decode_tar_stream(path, variant)?;
+    let mut archive = tar::Archive::new(reader);
+    let mut files = 0;
+    let mut bytes = 0;
+    let mut done = 0;
+    for entry in archive.entries().map_err(CommandError::failed)? {
+        ctx.check()?;
+        done += 1;
+        let mut entry = entry.map_err(CommandError::failed)?;
+        let name = entry
+            .path()
+            .map_err(CommandError::failed)?
+            .to_string_lossy()
+            .to_string();
+        ctx.progress(done, 0, &name);
+        if entry.header().entry_type().is_dir() {
+            continue;
+        }
+        io::copy(&mut entry, &mut io::sink()).map_err(CommandError::failed)?;
+        files += 1;
+        bytes += entry.size();
+    }
+    Ok(OperationResult {
+        files,
+        bytes,
+        elapsed_ms: 0,
+    })
+}
+
 #[tauri::command]
 async fn extract_archive(
     app: AppHandle,
@@ -709,7 +892,10 @@ fn extract_archive_inner(
     let mut result = match detect_format(path)? {
         "zip" => extract_zip(&ctx, path, dest_dir, password, selection, &mut written),
         "rar" => extract_rar(&ctx, path, dest_dir, password, selection, &mut written),
-        _ => extract_sevenz(&ctx, path, dest_dir, password, selection, &mut written),
+        "sevenz" => {
+            extract_sevenz(&ctx, path, dest_dir, password, selection, &mut written)
+        }
+        variant => extract_tar(&ctx, path, dest_dir, variant, selection, &mut written),
     };
     if let Ok(result) = &mut result {
         result.elapsed_ms = start.elapsed().as_millis() as u64;
@@ -922,7 +1108,8 @@ fn test_archive_inner(
     let mut result = match detect_format(path)? {
         "zip" => test_zip(&ctx, path, password),
         "rar" => test_rar(&ctx, path, password),
-        _ => test_sevenz(&ctx, path, password),
+        "sevenz" => test_sevenz(&ctx, path, password),
+        variant => test_tar(&ctx, path, variant),
     };
     if let Ok(result) = &mut result {
         result.elapsed_ms = start.elapsed().as_millis() as u64;
@@ -1490,6 +1677,133 @@ async fn create_sevenz(
 }
 
 // ---------------------------------------------------------------------------
+// Création d'archives TAR (tar.gz, tar.zst)
+// ---------------------------------------------------------------------------
+
+fn create_tar_inner(
+    app: Option<&AppHandle>,
+    registry: Option<&OperationRegistry>,
+    id: &str,
+    dest: &Path,
+    sources: &[PathBuf],
+    variant: &str,
+) -> CommandResult<OperationResult> {
+    if sources.is_empty() {
+        return Err(CommandError::failed("Aucun fichier source fourni."));
+    }
+    if dest.exists() {
+        return Err(CommandError::failed(
+            "Le fichier de destination existe déjà.",
+        ));
+    }
+    if dest_inside_sources(dest, sources) {
+        return Err(CommandError::failed(
+            "La destination se trouve dans un dossier source : l'archive s'inclurait elle-même.",
+        ));
+    }
+    let ctx = OpContext {
+        app,
+        registry,
+        id,
+    };
+    let plan = collect_sevenz_plan(sources)?;
+    let total = plan.iter().filter(|(_, path)| !path.is_dir()).count() as u64;
+    let mut result = OperationResult {
+        files: 0,
+        bytes: 0,
+        elapsed_ms: 0,
+    };
+    let start = std::time::Instant::now();
+    let file = File::create(dest).map_err(CommandError::failed)?;
+
+    fn push_tar_entries<W: Write>(
+        ctx: &OpContext,
+        builder: &mut tar::Builder<W>,
+        plan: &[(String, PathBuf)],
+        total: u64,
+        result: &mut OperationResult,
+    ) -> CommandResult<()> {
+        for (name, path) in plan {
+            ctx.check()?;
+            if path.is_dir() {
+                builder.append_dir(name, path).map_err(CommandError::failed)?;
+            } else {
+                builder
+                    .append_path_with_name(path, name)
+                    .map_err(CommandError::failed)?;
+                result.files += 1;
+                result.bytes += fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                ctx.progress(result.files, total, name);
+            }
+        }
+        Ok(())
+    }
+
+    let outcome = match variant {
+        "targz" => {
+            let encoder =
+                flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let outcome = push_tar_entries(&ctx, &mut builder, &plan, total, &mut result);
+            outcome.and_then(|_| {
+                let encoder = builder.into_inner().map_err(CommandError::failed)?;
+                encoder.finish().map_err(CommandError::failed)?;
+                Ok(())
+            })
+        }
+        "tarzst" => {
+            let encoder = zstd::stream::write::Encoder::new(file, 0)
+                .map_err(CommandError::failed)?;
+            let mut builder = tar::Builder::new(encoder);
+            let outcome = push_tar_entries(&ctx, &mut builder, &plan, total, &mut result);
+            outcome.and_then(|_| {
+                let encoder = builder.into_inner().map_err(CommandError::failed)?;
+                encoder.finish().map_err(CommandError::failed)?;
+                Ok(())
+            })
+        }
+        other => return Err(CommandError::failed(format!("Variante TAR inconnue : {other}"))),
+    };
+    if let Err(error) = outcome {
+        // Ne laisse pas d'archive partielle sur disque.
+        let _ = fs::remove_file(dest);
+        return Err(error);
+    }
+    result.elapsed_ms = start.elapsed().as_millis() as u64;
+    Ok(result)
+}
+
+#[tauri::command]
+async fn create_tar(
+    app: AppHandle,
+    registry: tauri::State<'_, Arc<OperationRegistry>>,
+    id: String,
+    dest: String,
+    sources: Vec<String>,
+    variant: String,
+) -> CommandResult<OperationResult> {
+    let registry = registry.inner().clone();
+    registry.begin(&id);
+    let task_registry = registry.clone();
+    let task_id = id.clone();
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let dest = PathBuf::from(&dest);
+        let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+        create_tar_inner(
+            Some(&app),
+            Some(&task_registry),
+            &task_id,
+            &dest,
+            &sources,
+            &variant,
+        )
+    });
+    let result = task.await.map_err(CommandError::failed);
+    registry.end(&id);
+    result?
+}
+
+// ---------------------------------------------------------------------------
 // Découpage en volumes (.001, .002, …)
 // ---------------------------------------------------------------------------
 
@@ -1739,6 +2053,7 @@ pub fn run() {
             extract_archive,
             create_zip,
             create_sevenz,
+            create_tar,
             test_archive,
             split_archive,
             cancel_operation
@@ -2379,6 +2694,181 @@ mod tests {
         assert!(matches!(error, CommandError::Cancelled { .. }));
         assert!(!volume_part(&dest_base, 1).exists());
         assert!(!volume_part(&dest_base, 2).exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn creation_tar_gz_roundtrip() {
+        let root = temp_root("tar-gz");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        write(&source_dir.join("sous/b.txt"), "contenu B");
+        let archive = root.join("test.tar.gz");
+
+        let created =
+            create_tar_inner(None, None, "", &archive, &[source_dir.clone()], "targz").unwrap();
+        assert_eq!(created.files, 2);
+
+        let entries = list_archive_inner(&archive, None).unwrap();
+        assert!(entries.iter().any(|e| e.path == "sources/a.txt"));
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let extracted = extract(&archive, &out, None, None).unwrap();
+        assert_eq!(extracted.files, 2);
+        assert_eq!(
+            fs::read_to_string(out.join("sources/a.txt")).unwrap(),
+            "contenu A"
+        );
+
+        // Test d'intégrité du flux compressé.
+        let tested = test_archive_inner(None, None, "", &archive, None).unwrap();
+        assert_eq!(tested.files, 2);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn creation_tar_zst_roundtrip() {
+        let root = temp_root("tar-zst");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        let archive = root.join("test.tar.zst");
+
+        create_tar_inner(None, None, "", &archive, &[source_dir.clone()], "tarzst").unwrap();
+        let entries = list_archive_inner(&archive, None).unwrap();
+        assert!(entries.iter().any(|e| e.path == "sources/a.txt"));
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        extract(&archive, &out, None, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(out.join("sources/a.txt")).unwrap(),
+            "contenu A"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Fabrique un fixture TAR dans l'encodage voulu (tar, tar.xz).
+    fn make_tar(path: &Path, entries: &[(&str, &str)], variant: &str) {
+        let file = File::create(path).unwrap();
+        let mut archive = tar::Builder::new(file);
+        for (name, content) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            if name.ends_with('/') {
+                archive.append_dir(name.trim_end_matches('/'), ".").unwrap();
+            } else {
+                archive.append_data(&mut header, *name, content.as_bytes()).unwrap();
+            }
+        }
+        archive.finish().unwrap();
+        if variant == "plain" {
+            return;
+        }
+        let raw = fs::read(path).unwrap();
+        let file = File::create(path).unwrap();
+        let mut encoder = xz2::write::XzEncoder::new(file, 6);
+        use std::io::Write as _;
+        encoder.write_all(&raw).unwrap();
+        encoder.finish().unwrap();
+    }
+
+    #[test]
+    fn lecture_tar_plain_et_xz() {
+        let root = temp_root("tar-read");
+        let plain = root.join("plain.tar");
+        make_tar(
+            &plain,
+            &[("./", ""), ("./a.txt", "contenu A"), ("./sous/b.txt", "contenu B")],
+            "plain",
+        );
+        let entries = list_archive_inner(&plain, None).unwrap();
+        // Le préfixe « ./ » est retiré ; l'entrée racine est ignorée.
+        assert!(entries
+            .iter()
+            .any(|e| !e.is_dir && e.path == "a.txt"));
+        assert!(entries.iter().any(|e| !e.is_dir && e.path == "sous/b.txt"));
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let extracted = extract(&plain, &out, None, None).unwrap();
+        assert_eq!(extracted.files, 2);
+        assert_eq!(fs::read_to_string(out.join("a.txt")).unwrap(), "contenu A");
+
+        // tar.xz : même contenu via le décodeur xz.
+        let xz = root.join("doc.txz");
+        make_tar(&xz, &[("note.txt", "contenu xz")], "xz");
+        let out2 = root.join("out2");
+        fs::create_dir_all(&out2).unwrap();
+        extract(&xz, &out2, None, None).unwrap();
+        assert_eq!(fs::read_to_string(out2.join("note.txt")).unwrap(), "contenu xz");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn normalisation_des_noms_tar() {
+        assert_eq!(tar_entry_name("./a.txt").as_deref(), Some("a.txt"));
+        assert_eq!(tar_entry_name("./").as_deref(), None);
+        assert_eq!(tar_entry_name(".").as_deref(), None);
+        assert_eq!(tar_entry_name("").as_deref(), None);
+        assert_eq!(
+            tar_entry_name("sous/b.txt").as_deref(),
+            Some("sous/b.txt")
+        );
+        // Nom absolu : ramené à la racine de destination.
+        assert_eq!(tar_entry_name("/a.txt").as_deref(), Some("a.txt"));
+    }
+
+    /// Fabrique un TAR brut — la crate `tar` refuse d'écrire des noms
+    /// malveillants, on doit donc forger les blocs d'en-tête à la main
+    /// pour tester la protection zip-slip.
+    fn make_raw_tar(path: &Path, entries: &[(&str, &str)]) {
+        let mut out: Vec<u8> = Vec::new();
+        for (name, content) in entries {
+            let mut block = [0u8; 512];
+            block[..name.len()].copy_from_slice(name.as_bytes());
+            block[100..108].copy_from_slice(b"0000644\0");
+            block[108..116].copy_from_slice(b"0000000\0");
+            block[116..124].copy_from_slice(b"0000000\0");
+            let size = format!("{:011o}\0", content.len());
+            block[124..136].copy_from_slice(size.as_bytes());
+            block[136..148].copy_from_slice(b"00000000000\0");
+            block[148..156].copy_from_slice(b"        ");
+            block[156] = b'0'; // fichier régulier
+            block[257..263].copy_from_slice(b"ustar\0");
+            block[263..265].copy_from_slice(b"00");
+            let chksum: u32 = block.iter().map(|&b| b as u32).sum();
+            let chksum_field = format!("{:06o}\0 ", chksum);
+            block[148..156].copy_from_slice(chksum_field.as_bytes());
+            out.extend_from_slice(&block);
+            let mut data = content.as_bytes().to_vec();
+            let padded = data.len().div_ceil(512) * 512;
+            data.resize(padded, 0);
+            out.extend_from_slice(&data);
+        }
+        // Deux blocs de zéros marquent la fin du flux.
+        out.extend_from_slice(&[0u8; 1024]);
+        fs::write(path, &out).unwrap();
+    }
+
+    #[test]
+    fn extraction_tar_refuse_les_chemins_malveillants() {
+        let root = temp_root("tar-slip");
+        let archive = root.join("evil.tar");
+        make_raw_tar(&archive, &[("ok.txt", "contenu A"), ("../evil.txt", "mal")]);
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        assert!(extract(&archive, &out, None, None).is_err());
+        // Le fichier écrit avant l'entrée malveillante est nettoyé.
+        assert!(!out.join("ok.txt").exists());
+        assert!(!root.join("evil.txt").exists());
 
         fs::remove_dir_all(&root).unwrap();
     }

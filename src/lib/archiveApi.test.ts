@@ -19,6 +19,18 @@ describe("detectFormat", () => {
     expect(detectFormat("vacances.7z.014")).toBe("sevenz");
     expect(detectFormat("vacances.rar.002")).toBe("rar");
   });
+
+  it("détecte la famille TAR par extension", () => {
+    expect(detectFormat("release.tar")).toBe("tar");
+    expect(detectFormat("release.tar.gz")).toBe("targz");
+    expect(detectFormat("release.tgz")).toBe("targz");
+    expect(detectFormat("release.tar.xz")).toBe("tarxz");
+    expect(detectFormat("release.txz")).toBe("tarxz");
+    expect(detectFormat("release.tar.zst")).toBe("tarzst");
+    expect(detectFormat("release.tzst")).toBe("tarzst");
+    // Le volume prime sur l'extension : base .tar.gz derrière .002.
+    expect(detectFormat("release.tar.gz.002")).toBe("targz");
+  });
 });
 
 describe("asAppError", () => {

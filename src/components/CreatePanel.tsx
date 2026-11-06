@@ -23,6 +23,8 @@ interface CreatePanelProps {
 const CREATE_FORMATS: { value: CreateFormat; label: string }[] = [
   { value: "zip", label: "ZIP · Deflate, multi-cœur" },
   { value: "sevenz", label: "7z · LZMA2, compression maximale" },
+  { value: "targz", label: "TAR.GZ · gzip, universel" },
+  { value: "tarzst", label: "TAR.ZST · Zstandard, rapide" },
 ];
 
 export default function CreatePanel({

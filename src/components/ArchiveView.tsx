@@ -26,6 +26,10 @@ const FORMAT_LABELS: Record<ArchiveFormat, string> = {
   zip: "ZIP",
   rar: "RAR",
   sevenz: "7Z",
+  tar: "TAR",
+  targz: "TAR.GZ",
+  tarxz: "TAR.XZ",
+  tarzst: "TAR.ZST",
 };
 
 export default function ArchiveView({

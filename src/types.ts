@@ -12,10 +12,11 @@ export interface OperationResult {
   elapsedMs: number;
 }
 
-export type ArchiveFormat = "zip" | "rar" | "sevenz";
+export type ArchiveFormat =
+  "zip" | "rar" | "sevenz" | "tar" | "targz" | "tarxz" | "tarzst";
 
 /** Formats proposés lors de la création d'une archive. */
-export type CreateFormat = "zip" | "sevenz";
+export type CreateFormat = "zip" | "sevenz" | "targz" | "tarzst";
 
 export type StatusKind = "info" | "success" | "error";
 

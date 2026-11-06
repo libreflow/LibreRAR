@@ -48,6 +48,10 @@ export function detectFormat(fileName: string): ArchiveFormat | null {
   if (lower.endsWith(".zip") || lower.endsWith(".jar")) return "zip";
   if (lower.endsWith(".rar")) return "rar";
   if (lower.endsWith(".7z")) return "sevenz";
+  if (lower.endsWith(".tar")) return "tar";
+  if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) return "targz";
+  if (lower.endsWith(".tar.xz") || lower.endsWith(".txz")) return "tarxz";
+  if (lower.endsWith(".tar.zst") || lower.endsWith(".tzst")) return "tarzst";
   return null;
 }
 
@@ -95,6 +99,16 @@ export function createSevenz(
     sources,
     password,
   });
+}
+
+/** Crée une archive TAR compressée (variante « targz » ou « tarzst »). */
+export function createTar(
+  id: string,
+  dest: string,
+  sources: string[],
+  variant: "targz" | "tarzst",
+): Promise<OperationResult> {
+  return invoke<OperationResult>("create_tar", { id, dest, sources, variant });
 }
 
 /** Demande l'annulation de l'opération identifiée par `id`. */

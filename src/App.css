@@ -252,6 +252,14 @@ kbd {
   color: var(--success);
 }
 
+.format-tar,
+.format-targz,
+.format-tarxz,
+.format-tarzst {
+  color: var(--gold);
+  font-size: 7px;
+}
+
 .app {
   display: flex;
   flex-direction: column;

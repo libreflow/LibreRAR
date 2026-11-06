@@ -16,6 +16,7 @@ import {
   asAppError,
   cancelOperation,
   createSevenz,
+  createTar,
   createZip,
   detectFormat,
   extractArchive,
@@ -56,7 +57,20 @@ interface OpenArchive {
 const ARCHIVE_FILTERS = [
   {
     name: "Archives",
-    extensions: ["zip", "rar", "7z", "jar", "001"],
+    extensions: [
+      "zip",
+      "rar",
+      "7z",
+      "jar",
+      "001",
+      "gz",
+      "tgz",
+      "xz",
+      "txz",
+      "zst",
+      "tzst",
+      "tar",
+    ],
   },
 ];
 
@@ -353,7 +367,9 @@ export default function App() {
         const result =
           format === "sevenz"
             ? await createSevenz(id, dest, sources, password)
-            : await createZip(id, dest, sources, password);
+            : format === "targz" || format === "tarzst"
+              ? await createTar(id, dest, sources, format)
+              : await createZip(id, dest, sources, password);
         setStatus({
           kind: "success",
           message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} compressé(s) en ${formatDuration(result.elapsedMs)} → ${dest}${
@@ -544,7 +560,11 @@ export default function App() {
       const filters =
         createFormat === "sevenz"
           ? [{ name: "Archive 7z", extensions: ["7z"] }]
-          : [{ name: "Archive ZIP", extensions: ["zip"] }];
+          : createFormat === "targz"
+            ? [{ name: "Archive TAR.GZ", extensions: ["gz", "tgz"] }]
+            : createFormat === "tarzst"
+              ? [{ name: "Archive TAR.ZST", extensions: ["zst", "tzst"] }]
+              : [{ name: "Archive ZIP", extensions: ["zip"] }];
       const dest = await save({ filters });
       if (typeof dest === "string" && dest.length > 0) {
         await handleCreate(dest, sources, password, createFormat);
