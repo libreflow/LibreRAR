@@ -98,3 +98,12 @@ export function createSevenz(
 export function cancelOperation(id: string): Promise<void> {
   return invoke<void>("cancel_operation", { id });
 }
+
+/** Teste l'intégrité de toutes les entrées (CRC) sans extraction. */
+export function testArchive(
+  id: string,
+  path: string,
+  password: string | null = null,
+): Promise<OperationResult> {
+  return invoke<OperationResult>("test_archive", { id, path, password });
+}

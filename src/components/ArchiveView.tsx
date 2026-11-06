@@ -18,6 +18,7 @@ interface ArchiveViewProps {
   entries: ArchiveEntry[];
   busy: boolean;
   onExtract: (password: string | null, selection: string[]) => void;
+  onTest: (password: string | null) => void;
 }
 
 const FORMAT_LABELS: Record<ArchiveFormat, string> = {
@@ -32,6 +33,7 @@ export default function ArchiveView({
   entries,
   busy,
   onExtract,
+  onTest,
 }: ArchiveViewProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -148,7 +150,9 @@ export default function ArchiveView({
         <button
           className="primary"
           disabled={busy}
-          onClick={() => onExtract(password.length > 0 ? password : null, selection)}
+          onClick={() =>
+            onExtract(password.length > 0 ? password : null, selection)
+          }
         >
           {busy ? (
             <>
@@ -160,20 +164,40 @@ export default function ArchiveView({
             "Tout extraire…"
           )}
         </button>
+        <button
+          disabled={busy}
+          onClick={() => onTest(password.length > 0 ? password : null)}
+          title="Vérifier l'intégrité des entrées (CRC) sans extraction"
+        >
+          {busy ? (
+            <>
+              <LoaderIcon className="spin" /> Test…
+            </>
+          ) : (
+            "Tester"
+          )}
+        </button>
       </div>
 
-      <div className="entry-table" role="table" aria-label={`Contenu de ${archiveName}`}>
+      <div
+        className="entry-table"
+        role="table"
+        aria-label={`Contenu de ${archiveName}`}
+      >
         <div className="entry-row entry-head" role="row">
           <span role="columnheader">
             <button
               type="button"
               className="checkbox"
               role="checkbox"
-              aria-checked={visible.length > 0 && visible.every((e) => selected.has(e.path))}
+              aria-checked={
+                visible.length > 0 && visible.every((e) => selected.has(e.path))
+              }
               onClick={toggleAllVisible}
               aria-label="Tout sélectionner"
             >
-              {visible.length > 0 && visible.every((e) => selected.has(e.path)) ? (
+              {visible.length > 0 &&
+              visible.every((e) => selected.has(e.path)) ? (
                 <SquareCheckIcon />
               ) : (
                 <SquareIcon />
@@ -181,22 +205,50 @@ export default function ArchiveView({
             </button>
           </span>
           <span role="columnheader" aria-sort={ariaSort("name")}>
-            <button type="button" className="th-button" onClick={() => sortBy("name")}>
+            <button
+              type="button"
+              className="th-button"
+              onClick={() => sortBy("name")}
+            >
               Nom {sortIndicator("name")}
             </button>
           </span>
-          <span className="cell-num" role="columnheader" aria-sort={ariaSort("size")}>
-            <button type="button" className="th-button" onClick={() => sortBy("size")}>
+          <span
+            className="cell-num"
+            role="columnheader"
+            aria-sort={ariaSort("size")}
+          >
+            <button
+              type="button"
+              className="th-button"
+              onClick={() => sortBy("size")}
+            >
               Taille {sortIndicator("size")}
             </button>
           </span>
-          <span className="cell-num" role="columnheader" aria-sort={ariaSort("compressed")}>
-            <button type="button" className="th-button" onClick={() => sortBy("compressed")}>
+          <span
+            className="cell-num"
+            role="columnheader"
+            aria-sort={ariaSort("compressed")}
+          >
+            <button
+              type="button"
+              className="th-button"
+              onClick={() => sortBy("compressed")}
+            >
               Compressé {sortIndicator("compressed")}
             </button>
           </span>
-          <span className="cell-num" role="columnheader" aria-sort={ariaSort("ratio")}>
-            <button type="button" className="th-button" onClick={() => sortBy("ratio")}>
+          <span
+            className="cell-num"
+            role="columnheader"
+            aria-sort={ariaSort("ratio")}
+          >
+            <button
+              type="button"
+              className="th-button"
+              onClick={() => sortBy("ratio")}
+            >
               Taux {sortIndicator("ratio")}
             </button>
           </span>
@@ -221,7 +273,11 @@ export default function ArchiveView({
                   toggle(entry.path);
                 }}
               >
-                {selected.has(entry.path) ? <SquareCheckIcon /> : <SquareIcon />}
+                {selected.has(entry.path) ? (
+                  <SquareCheckIcon />
+                ) : (
+                  <SquareIcon />
+                )}
               </button>
             </span>
             <span className="entry-name" role="cell">
@@ -237,12 +293,16 @@ export default function ArchiveView({
                 : formatBytes(entry.compressedSize)}
             </span>
             <span className="cell-num" role="cell">
-              {entry.isDir ? "—" : compressionRatio(entry.size, entry.compressedSize)}
+              {entry.isDir
+                ? "—"
+                : compressionRatio(entry.size, entry.compressedSize)}
             </span>
           </div>
         ))}
         {visible.length === 0 && (
-          <div className="entry-empty">Aucune entrée ne correspond au filtre.</div>
+          <div className="entry-empty">
+            Aucune entrée ne correspond au filtre.
+          </div>
         )}
       </div>
 

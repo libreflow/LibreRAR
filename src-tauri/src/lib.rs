@@ -727,6 +727,203 @@ async fn cancel_operation(
 }
 
 // ---------------------------------------------------------------------------
+// Test d'intégrité
+// ---------------------------------------------------------------------------
+
+/// Teste les entrées d'un ZIP : chaque fichier est décompressé jusqu'au
+/// bout vers un « sink » — la crate `zip` valide le CRC-32 en fin de
+/// lecture (les dossiers n'ont rien à vérifier).
+fn test_zip(
+    ctx: &OpContext,
+    path: &Path,
+    password: Option<&str>,
+) -> CommandResult<OperationResult> {
+    let file = File::open(path).map_err(CommandError::failed)?;
+    let mut archive = ZipArchive::new(file).map_err(zip_err)?;
+    let total = archive.len() as u64;
+    let mut files = 0;
+    let mut bytes = 0;
+    let mut done = 0;
+    for index in 0..archive.len() {
+        ctx.check()?;
+        let header = archive.by_index_raw(index).map_err(zip_err)?;
+        let name = header.name().map_err(zip_err)?.replace('\\', "/");
+        let is_dir = header.is_dir() || name.ends_with('/');
+        let size = header.size();
+        let encrypted = header.encrypted();
+        drop(header);
+
+        done += 1;
+        ctx.progress(done, total, &name);
+        if is_dir {
+            continue;
+        }
+        let mut entry = if encrypted {
+            let password = password.ok_or_else(|| CommandError::PasswordRequired {
+                message: format!("Mot de passe requis pour l'entrée chiffrée : {name}"),
+            })?;
+            archive
+                .by_index_decrypt(index, password.as_bytes())
+                .map_err(zip_err)?
+        } else {
+            archive.by_index(index).map_err(zip_err)?
+        };
+        // La lecture complète déclenche la vérification du CRC-32.
+        io::copy(&mut entry, &mut io::sink()).map_err(CommandError::failed)?;
+        files += 1;
+        bytes += size;
+    }
+    Ok(OperationResult {
+        files,
+        bytes,
+        elapsed_ms: 0,
+    })
+}
+
+/// Teste les entrées d'un RAR via le test natif d'UnRAR (aucune
+/// extraction, le CRC de chaque fichier est vérifié par la bibliothèque).
+fn test_rar(
+    ctx: &OpContext,
+    path: &Path,
+    password: Option<&str>,
+) -> CommandResult<OperationResult> {
+    let total = list_rar(path, password)?.len() as u64;
+    let archive = match password {
+        Some(password) => unrar::Archive::with_password(path, password),
+        None => unrar::Archive::new(path),
+    };
+    let mut open = archive.open_for_processing().map_err(rar_err)?;
+    let mut files = 0;
+    let mut bytes = 0;
+    let mut done = 0;
+    loop {
+        ctx.check()?;
+        let before_file = match open.read_header().map_err(rar_err)? {
+            Some(next) => next,
+            None => {
+                return Ok(OperationResult {
+                    files,
+                    bytes,
+                    elapsed_ms: 0,
+                })
+            }
+        };
+        let header = before_file.entry();
+        let name = header.filename.to_string_lossy().replace('\\', "/");
+        let is_dir = header.is_directory() || name.ends_with('/');
+        let size = header.unpacked_size;
+        done += 1;
+        ctx.progress(done, total, &name);
+        open = before_file.test().map_err(rar_err)?;
+        if !is_dir {
+            files += 1;
+            bytes += size;
+        }
+    }
+}
+
+/// Teste les entrées d'un 7z : chaque fichier est lu jusqu'au bout — le
+/// lecteur sevenz-rust vérifie le CRC de chaque sous-flux.
+fn test_sevenz(
+    ctx: &OpContext,
+    path: &Path,
+    password: Option<&str>,
+) -> CommandResult<OperationResult> {
+    let password = match password {
+        Some(p) => sevenz_rust::Password::from(p),
+        None => sevenz_rust::Password::empty(),
+    };
+    let mut reader = sevenz_rust::SevenZReader::open(path, password).map_err(sevenz_err)?;
+    let total = reader.archive().files.len() as u64;
+    let mut result = OperationResult {
+        files: 0,
+        bytes: 0,
+        elapsed_ms: 0,
+    };
+    let mut failure: Option<CommandError> = None;
+    let mut done = 0;
+    reader
+        .for_each_entries(|entry, entry_reader| {
+            let outcome = (|| -> CommandResult<()> {
+                ctx.check()?;
+                done += 1;
+                ctx.progress(done, total, &entry.name);
+                if entry.is_directory() {
+                    return Ok(());
+                }
+                io::copy(entry_reader, &mut io::sink()).map_err(CommandError::failed)?;
+                result.files += 1;
+                result.bytes += entry.size;
+                Ok(())
+            })();
+            match outcome {
+                Ok(()) => Ok(true),
+                Err(error) => {
+                    failure = Some(error);
+                    Ok(false)
+                }
+            }
+        })
+        .map_err(sevenz_err)?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn test_archive(
+    app: AppHandle,
+    registry: tauri::State<'_, Arc<OperationRegistry>>,
+    id: String,
+    path: String,
+    password: Option<String>,
+) -> CommandResult<OperationResult> {
+    let registry = registry.inner().clone();
+    registry.begin(&id);
+    let task_registry = registry.clone();
+    let task_id = id.clone();
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(&path);
+        let password = normalize_password(&password);
+        test_archive_inner(Some(&app), Some(&task_registry), &task_id, &path, password)
+    });
+    let result = task.await.map_err(CommandError::failed);
+    registry.end(&id);
+    result?
+}
+
+fn test_archive_inner(
+    app: Option<&AppHandle>,
+    registry: Option<&OperationRegistry>,
+    id: &str,
+    path: &Path,
+    password: Option<&str>,
+) -> CommandResult<OperationResult> {
+    if !path.is_file() {
+        return Err(CommandError::failed(format!(
+            "Fichier introuvable : {}",
+            path.display()
+        )));
+    }
+    let ctx = OpContext {
+        app,
+        registry,
+        id,
+    };
+    let start = std::time::Instant::now();
+    let mut result = match detect_format(path)? {
+        "zip" => test_zip(&ctx, path, password),
+        "rar" => test_rar(&ctx, path, password),
+        _ => test_sevenz(&ctx, path, password),
+    };
+    if let Ok(result) = &mut result {
+        result.elapsed_ms = start.elapsed().as_millis() as u64;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Création d'archives ZIP
 // ---------------------------------------------------------------------------
 
@@ -1300,6 +1497,7 @@ pub fn run() {
             extract_archive,
             create_zip,
             create_sevenz,
+            test_archive,
             cancel_operation
         ])
         .run(tauri::generate_context!())
@@ -1748,6 +1946,85 @@ mod tests {
             fs::read_to_string(out2.join("a.txt")).unwrap(),
             "contenu secret"
         );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_integrite_zip_valide() {
+        let root = temp_root("test-ok");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        write(&source_dir.join("b.txt"), "contenu B");
+        let archive = root.join("ok.zip");
+        create_zip_inner(None, None, "", &archive, &[source_dir], None).unwrap();
+
+        let tested = test_archive_inner(None, None, "", &archive, None).unwrap();
+        assert_eq!(tested.files, 2);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_integrite_zip_corrompu_echoue() {
+        let root = temp_root("test-ko");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), &"contenu compressible ".repeat(64));
+        let archive = root.join("ko.zip");
+        create_zip_inner(None, None, "", &archive, &[source_dir.clone()], None).unwrap();
+
+        // Altère un octet dans la zone de données de la première entrée
+        // fichier (les dossiers n'ont pas de données) : deflate cassé ou
+        // CRC invalide — la vérification doit échouer.
+        let data_start = {
+            let file = File::open(&archive).unwrap();
+            let mut zip = ZipArchive::new(file).unwrap();
+            let mut start = None;
+            for index in 0..zip.len() {
+                let entry = zip.by_index_raw(index).unwrap();
+                if !entry.is_dir() {
+                    start = entry.data_start();
+                    break;
+                }
+            }
+            start.unwrap()
+        };
+        let mut bytes = fs::read(&archive).unwrap();
+        bytes[(data_start + 5) as usize] ^= 0xff;
+        fs::write(&archive, &bytes).unwrap();
+
+        assert!(test_archive_inner(None, None, "", &archive, None).is_err());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_integrite_sevenz() {
+        let root = temp_root("test-7z");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        let archive = root.join("ok.7z");
+        create_sevenz_inner(None, None, "", &archive, &[source_dir], None).unwrap();
+
+        let tested = test_archive_inner(None, None, "", &archive, None).unwrap();
+        assert_eq!(tested.files, 1);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_integrite_annulation() {
+        let root = temp_root("test-cancel");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        let archive = root.join("annule.zip");
+        create_zip_inner(None, None, "", &archive, &[source_dir], None).unwrap();
+
+        let registry = OperationRegistry::default();
+        registry.begin("op-t");
+        registry.cancel("op-t");
+        let error = test_archive_inner(None, Some(&registry), "op-t", &archive, None).unwrap_err();
+        assert!(matches!(error, CommandError::Cancelled { .. }));
 
         fs::remove_dir_all(&root).unwrap();
     }

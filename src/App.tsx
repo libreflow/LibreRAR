@@ -20,6 +20,7 @@ import {
   detectFormat,
   extractArchive,
   listArchive,
+  testArchive,
   type OperationProgress,
 } from "./lib/archiveApi";
 import { isTauri } from "./lib/platform";
@@ -379,6 +380,44 @@ export default function App() {
     [openArchive],
   );
 
+  // Test d'intégrité : vérifie toutes les entrées (CRC) sans extraction.
+  const handleTest = useCallback(
+    async (password: string | null) => {
+      if (!archive) return;
+      const id = beginOperation();
+      setBusy(true);
+      setStatus(null);
+      try {
+        const result = await testArchive(id, archive.path, password);
+        setStatus({
+          kind: "success",
+          message: `${archive.name} est intègre — ${result.files} fichier(s) · ${formatBytes(result.bytes)} vérifiés en ${formatDuration(result.elapsedMs)}`,
+        });
+      } catch (error) {
+        const appError = asAppError(error);
+        if (appError.kind === "cancelled") {
+          setStatus({ kind: "info", message: "Test annulé." });
+        } else if (appError.kind === "passwordRequired") {
+          setStatus({
+            kind: "error",
+            message: `Test impossible — mot de passe requis : ${appError.message}`,
+          });
+          setPendingPath(archive.path);
+        } else {
+          setStatus({
+            kind: "error",
+            message: `Archive endommagée : ${appError.message}`,
+          });
+        }
+      } finally {
+        setBusy(false);
+        setProgress(null);
+        setCancellable(false);
+      }
+    },
+    [archive],
+  );
+
   const pickExtractDir = useCallback(
     async (password: string | null, selection: string[]) => {
       const destDir = await open({ directory: true, multiple: false });
@@ -671,6 +710,7 @@ export default function App() {
             onExtract={(password, selection) =>
               void pickExtractDir(password, selection)
             }
+            onTest={(password) => void handleTest(password)}
           />
         ) : (
           <DropZone busy={busy} onPick={() => void chooseArchive()} />
