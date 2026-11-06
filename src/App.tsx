@@ -20,6 +20,7 @@ import {
   detectFormat,
   extractArchive,
   listArchive,
+  splitArchive,
   testArchive,
   type OperationProgress,
 } from "./lib/archiveApi";
@@ -34,6 +35,7 @@ import DropZone from "./components/DropZone";
 import ArchiveView from "./components/ArchiveView";
 import CreatePanel from "./components/CreatePanel";
 import SettingsPanel from "./components/SettingsPanel";
+import SplitPanel from "./components/SplitPanel";
 import BalatroPopup, { pickPraise } from "./components/BalatroPopup";
 import {
   CircleCheckIcon,
@@ -54,7 +56,7 @@ interface OpenArchive {
 const ARCHIVE_FILTERS = [
   {
     name: "Archives",
-    extensions: ["zip", "rar", "7z", "jar"],
+    extensions: ["zip", "rar", "7z", "jar", "001"],
   },
 ];
 
@@ -87,6 +89,8 @@ export default function App() {
   );
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Découpe en volumes : modale de choix de la taille des parties.
+  const [splitOpen, setSplitOpen] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   // Archive dont la lecture (ou l'extraction) a échoué : mot de passe
   // probablement requis. `pendingExtract` garde les paramètres d'une
@@ -418,6 +422,46 @@ export default function App() {
     [archive],
   );
 
+  // Découpe de l'archive ouverte en volumes (dest.001, .002, …).
+  const handleSplit = useCallback(
+    async (partSize: number) => {
+      if (!archive) return;
+      setSplitOpen(false);
+      // Le nom de base est libre : l'utilisateur choisit la destination.
+      const destBase = await save({
+        title: "Nom de base des volumes",
+        filters: [],
+      });
+      if (typeof destBase !== "string" || destBase.length === 0) return;
+      const id = beginOperation();
+      setBusy(true);
+      setStatus(null);
+      try {
+        const result = await splitArchive(id, archive.path, destBase, partSize);
+        setLastResult(result);
+        setStatus({
+          kind: "success",
+          message: `Archive découpée en ${result.files} volume(s) · ${formatBytes(result.bytes)} en ${formatDuration(result.elapsedMs)} → ${destBase}.001`,
+        });
+      } catch (error) {
+        const appError = asAppError(error);
+        if (appError.kind === "cancelled") {
+          setStatus({ kind: "info", message: "Découpe annulée." });
+        } else {
+          setStatus({
+            kind: "error",
+            message: `Échec de la découpe : ${appError.message}`,
+          });
+        }
+      } finally {
+        setBusy(false);
+        setProgress(null);
+        setCancellable(false);
+      }
+    },
+    [archive],
+  );
+
   const pickExtractDir = useCallback(
     async (password: string | null, selection: string[]) => {
       const destDir = await open({ directory: true, multiple: false });
@@ -624,6 +668,14 @@ export default function App() {
         />
       )}
 
+      {splitOpen && archive && (
+        <SplitPanel
+          archiveName={archive.name}
+          onPick={(partSize) => void handleSplit(partSize)}
+          onClose={() => setSplitOpen(false)}
+        />
+      )}
+
       {status && (
         <div className={`status status-${status.kind}`} role="status">
           {(() => {
@@ -711,6 +763,7 @@ export default function App() {
               void pickExtractDir(password, selection)
             }
             onTest={(password) => void handleTest(password)}
+            onSplit={() => setSplitOpen(true)}
           />
         ) : (
           <DropZone busy={busy} onPick={() => void chooseArchive()} />

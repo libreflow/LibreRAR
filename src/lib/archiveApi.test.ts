@@ -13,15 +13,25 @@ describe("detectFormat", () => {
     expect(detectFormat("photo.png")).toBeNull();
     expect(detectFormat("archive.rar.exe")).toBeNull();
   });
+
+  it("détecte le format derrière un suffixe de volume (.001…)", () => {
+    expect(detectFormat("vacances.zip.001")).toBe("zip");
+    expect(detectFormat("vacances.7z.014")).toBe("sevenz");
+    expect(detectFormat("vacances.rar.002")).toBe("rar");
+  });
 });
 
 describe("asAppError", () => {
   it("conserve les erreurs structurées du backend", () => {
-    expect(asAppError({ kind: "cancelled", message: "Opération annulée." })).toEqual({
+    expect(
+      asAppError({ kind: "cancelled", message: "Opération annulée." }),
+    ).toEqual({
       kind: "cancelled",
       message: "Opération annulée.",
     });
-    expect(asAppError({ kind: "passwordRequired", message: "Mot de passe requis." })).toEqual({
+    expect(
+      asAppError({ kind: "passwordRequired", message: "Mot de passe requis." }),
+    ).toEqual({
       kind: "passwordRequired",
       message: "Mot de passe requis.",
     });

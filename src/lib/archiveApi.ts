@@ -41,7 +41,10 @@ export function asAppError(error: unknown): AppError {
 }
 
 export function detectFormat(fileName: string): ArchiveFormat | null {
-  const lower = fileName.toLowerCase();
+  // Une partie de volume (xxx.zip.001) est nommée par sa base : le format
+  // est détecté après avoir retiré le suffixe de partie.
+  const candidate = fileName.replace(/\.\d{3}$/, "");
+  const lower = (candidate || fileName).toLowerCase();
   if (lower.endsWith(".zip") || lower.endsWith(".jar")) return "zip";
   if (lower.endsWith(".rar")) return "rar";
   if (lower.endsWith(".7z")) return "sevenz";
@@ -97,6 +100,21 @@ export function createSevenz(
 /** Demande l'annulation de l'opération identifiée par `id`. */
 export function cancelOperation(id: string): Promise<void> {
   return invoke<void>("cancel_operation", { id });
+}
+
+/** Découpe une archive en volumes de `partSize` octets (dest.001, …). */
+export function splitArchive(
+  id: string,
+  src: string,
+  destBase: string,
+  partSize: number,
+): Promise<OperationResult> {
+  return invoke<OperationResult>("split_archive", {
+    id,
+    src,
+    destBase: destBase,
+    partSize: partSize,
+  });
 }
 
 /** Teste l'intégrité de toutes les entrées (CRC) sans extraction. */

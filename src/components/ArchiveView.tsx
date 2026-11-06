@@ -19,6 +19,7 @@ interface ArchiveViewProps {
   busy: boolean;
   onExtract: (password: string | null, selection: string[]) => void;
   onTest: (password: string | null) => void;
+  onSplit: () => void;
 }
 
 const FORMAT_LABELS: Record<ArchiveFormat, string> = {
@@ -34,6 +35,7 @@ export default function ArchiveView({
   busy,
   onExtract,
   onTest,
+  onSplit,
 }: ArchiveViewProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -176,6 +178,13 @@ export default function ArchiveView({
           ) : (
             "Tester"
           )}
+        </button>
+        <button
+          disabled={busy}
+          onClick={onSplit}
+          title="Découper l'archive en volumes"
+        >
+          Découper…
         </button>
       </div>
 

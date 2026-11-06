@@ -757,6 +757,13 @@ input:focus {
   font-size: 14px;
 }
 
+.split-sizes {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
 .password-prompt {
   margin: 10px 16px;
   padding: 10px 12px;

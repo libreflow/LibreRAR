@@ -417,6 +417,8 @@ async fn list_archive(
     tauri::async_runtime::spawn_blocking(move || {
         let path = PathBuf::from(path);
         let password = normalize_password(&password);
+        // Partie de volume (.001…) : réassemblage temporaire avant lecture.
+        let (path, _assembled) = resolve_archive_path(&path)?;
         list_archive_inner(&path, password)
     })
     .await
@@ -658,6 +660,9 @@ async fn extract_archive(
         let password = normalize_password(&password);
         let selection: Option<HashSet<String>> =
             entries.map(|entries| entries.into_iter().collect());
+        // Partie de volume (.001…) : réassemblage temporaire avant
+        // extraction (le garde-fou supprime la copie en fin d'opération).
+        let (path, _assembled) = resolve_archive_path(&path)?;
         extract_archive_inner(
             Some(&app),
             Some(&task_registry),
@@ -886,6 +891,8 @@ async fn test_archive(
     let task = tauri::async_runtime::spawn_blocking(move || {
         let path = PathBuf::from(&path);
         let password = normalize_password(&password);
+        // Partie de volume (.001…) : réassemblage temporaire avant test.
+        let (path, _assembled) = resolve_archive_path(&path)?;
         test_archive_inner(Some(&app), Some(&task_registry), &task_id, &path, password)
     });
     let result = task.await.map_err(CommandError::failed);
@@ -1483,6 +1490,241 @@ async fn create_sevenz(
 }
 
 // ---------------------------------------------------------------------------
+// Découpage en volumes (.001, .002, …)
+// ---------------------------------------------------------------------------
+
+/// Maximum de parties par archive (numérotation sur 3 chiffres).
+const MAX_VOLUME_PARTS: u32 = 999;
+
+/// Vrai si `path` est la partie `NNN` d'une archive découpée ; retourne
+/// le chemin de base (sans l'extension `.NNN`).
+fn volume_base(path: &Path) -> Option<PathBuf> {
+    let ext = path.extension()?.to_str()?;
+    if ext.len() == 3 && ext.bytes().all(|b| b.is_ascii_digit()) {
+        Some(path.with_extension(""))
+    } else {
+        None
+    }
+}
+
+/// Chemin de la partie `index` de la base donnée.
+fn volume_part(base: &Path, index: u32) -> PathBuf {
+    let mut name = base.as_os_str().to_os_string();
+    name.push(format!(".{index:03}"));
+    PathBuf::from(name)
+}
+
+/// Dossier temporaire supprimé à la destruction du garde (même en cas
+/// d'erreur) : jamais de résidu après une opération sur volumes.
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Archive réassemblée depuis des parties de volumes.
+struct Assembled {
+    _temp: TempDirGuard,
+    archive: PathBuf,
+}
+
+/// Réassemble les parties de l'archive dont `part` est un élément
+/// (`xxx.001`, `xxx.002`, …) dans un fichier temporaire. `None` si `part`
+/// n'est pas une partie de volume.
+fn assemble_volumes(part: &Path) -> CommandResult<Option<Assembled>> {
+    let Some(base) = volume_base(part) else {
+        return Ok(None);
+    };
+    // Toutes les parties consécutives à partir de .001.
+    let mut parts = Vec::new();
+    for index in 1..=MAX_VOLUME_PARTS {
+        let path = volume_part(&base, index);
+        if path.is_file() {
+            parts.push(path);
+        } else {
+            break;
+        }
+    }
+    if parts.is_empty() {
+        return Err(CommandError::failed(
+            "Aucune suite de volumes trouvée (attendu : .001, .002, …).",
+        ));
+    }
+    let Some(archive_name) = base.file_name() else {
+        return Err(CommandError::failed("Nom de volume invalide."));
+    };
+    let temp_dir = std::env::temp_dir().join(format!(
+        "librerar-join-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).map_err(CommandError::failed)?;
+    let guard = TempDirGuard(temp_dir.clone());
+    let archive = temp_dir.join(archive_name);
+    {
+        let mut out = File::create(&archive).map_err(CommandError::failed)?;
+        for path in &parts {
+            let mut file = File::open(path).map_err(CommandError::failed)?;
+            io::copy(&mut file, &mut out).map_err(CommandError::failed)?;
+        }
+        out.flush().map_err(CommandError::failed)?;
+    }
+    Ok(Some(Assembled {
+        _temp: guard,
+        archive,
+    }))
+}
+
+/// Résout le chemin d'opération : archive simple → inchangée ; partie de
+/// volume → archive réassemblée (temporaire, nettoyée via `Assembled`).
+fn resolve_archive_path(path: &Path) -> CommandResult<(PathBuf, Option<Assembled>)> {
+    match assemble_volumes(path)? {
+        Some(assembled) => {
+            let archive = assembled.archive.clone();
+            Ok((archive, Some(assembled)))
+        }
+        None => Ok((path.to_path_buf(), None)),
+    }
+}
+
+/// Découpe `src` en parties de `part_size` octets nommées
+/// `dest_base.001`, `.002`, … Progression et annulation comme les autres
+/// opérations ; en cas d'échec, les parties déjà écrites sont supprimées.
+#[allow(clippy::too_many_arguments)]
+fn split_archive_inner(
+    app: Option<&AppHandle>,
+    registry: Option<&OperationRegistry>,
+    id: &str,
+    src: &Path,
+    dest_base: &Path,
+    part_size: u64,
+) -> CommandResult<OperationResult> {
+    if part_size == 0 {
+        return Err(CommandError::failed(
+            "La taille de volume doit être d'au moins 1 octet.",
+        ));
+    }
+    if !src.is_file() {
+        return Err(CommandError::failed(format!(
+            "Fichier introuvable : {}",
+            src.display()
+        )));
+    }
+    if volume_base(src).is_some() {
+        return Err(CommandError::failed(
+            "Ce fichier est déjà une partie de volume.",
+        ));
+    }
+    if volume_part(dest_base, 1).exists() {
+        return Err(CommandError::failed(
+            "La destination existe déjà (première partie).",
+        ));
+    }
+    if let Some(parent) = dest_base.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(CommandError::failed)?;
+        }
+    }
+    let ctx = OpContext {
+        app,
+        registry,
+        id,
+    };
+    let total = fs::metadata(src).map_err(CommandError::failed)?.len();
+    if total.div_ceil(part_size) > MAX_VOLUME_PARTS as u64 {
+        return Err(CommandError::failed(format!(
+            "Trop de volumes requis (maximum {MAX_VOLUME_PARTS})."
+        )));
+    }
+    let mut result = OperationResult {
+        files: 0,
+        bytes: 0,
+        elapsed_ms: 0,
+    };
+    let start = std::time::Instant::now();
+    let mut src_file = File::open(src).map_err(CommandError::failed)?;
+    let mut buffer = vec![0u8; 128 * 1024];
+    let mut written: Vec<PathBuf> = Vec::new();
+    let outcome = (|| -> CommandResult<()> {
+        loop {
+            ctx.check()?;
+            let mut remaining = part_size;
+            let part_path = volume_part(dest_base, (written.len() + 1) as u32);
+            let mut out = File::create(&part_path).map_err(CommandError::failed)?;
+            written.push(part_path);
+            let mut wrote_any = false;
+            while remaining > 0 {
+                let want = buffer.len().min(remaining as usize);
+                let read = src_file.read(&mut buffer[..want]).map_err(CommandError::failed)?;
+                if read == 0 {
+                    if !wrote_any {
+                        // Fichier terminé exactement à la frontière d'une
+                        // partie : la partie vide n'est pas écrite.
+                        let _ = fs::remove_file(written.pop().unwrap());
+                    }
+                    return Ok(());
+                }
+                out.write_all(&buffer[..read]).map_err(CommandError::failed)?;
+                wrote_any = true;
+                remaining -= read as u64;
+                result.bytes += read as u64;
+                result.files = written.len() as u64;
+                ctx.progress(result.bytes, total, &format!("partie {:03}", written.len()));
+            }
+            result.files = written.len() as u64;
+        }
+    })();
+    match outcome {
+        Ok(()) => {
+            result.elapsed_ms = start.elapsed().as_millis() as u64;
+            Ok(result)
+        }
+        Err(error) => {
+            // Échec ou annulation : aucune partie résiduelle.
+            for path in &written {
+                let _ = fs::remove_file(path);
+            }
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+async fn split_archive(
+    app: AppHandle,
+    registry: tauri::State<'_, Arc<OperationRegistry>>,
+    id: String,
+    src: String,
+    dest_base: String,
+    part_size: u64,
+) -> CommandResult<OperationResult> {
+    let registry = registry.inner().clone();
+    registry.begin(&id);
+    let task_registry = registry.clone();
+    let task_id = id.clone();
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let src = PathBuf::from(&src);
+        let dest_base = PathBuf::from(&dest_base);
+        split_archive_inner(
+            Some(&app),
+            Some(&task_registry),
+            &task_id,
+            &src,
+            &dest_base,
+            part_size,
+        )
+    });
+    let result = task.await.map_err(CommandError::failed);
+    registry.end(&id);
+    result?
+}
+
+// ---------------------------------------------------------------------------
 // Point d'entrée Tauri
 // ---------------------------------------------------------------------------
 
@@ -1498,6 +1740,7 @@ pub fn run() {
             create_zip,
             create_sevenz,
             test_archive,
+            split_archive,
             cancel_operation
         ])
         .run(tauri::generate_context!())
@@ -2025,6 +2268,117 @@ mod tests {
         registry.cancel("op-t");
         let error = test_archive_inner(None, Some(&registry), "op-t", &archive, None).unwrap_err();
         assert!(matches!(error, CommandError::Cancelled { .. }));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn decoupage_en_volumes_puis_recollement() {
+        let root = temp_root("split");
+        let source_dir = root.join("sources");
+        // Contenu incompressible (hexadécimal pseudo-aléatoire) : davantage
+        // de quelques parties, pour couvrir les frontières de découpe.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut data = String::new();
+        for _ in 0..2048 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            data.push_str(&format!("{:016x}\n", x));
+        }
+        write(&source_dir.join("a.txt"), &data);
+        let archive = root.join("monarchive.zip");
+        create_zip_inner(None, None, "", &archive, &[source_dir], None).unwrap();
+        let total = fs::metadata(&archive).unwrap().len();
+        let part = 8192u64;
+        let expected_parts = (total.div_ceil(part)) as usize;
+        assert!(expected_parts >= 3, "archive trop petite pour le test");
+
+        let dest_base = root.join("transfert/monarchive.zip");
+        let split = split_archive_inner(None, None, "", &archive, &dest_base, part).unwrap();
+        assert_eq!(split.files, expected_parts as u64);
+        assert_eq!(split.bytes, total);
+
+        // Les parties existent, la dernière est plus courte.
+        for i in 1..=expected_parts {
+            let path = volume_part(&dest_base, i as u32);
+            assert!(path.is_file(), "partie manquante : {}", path.display());
+        }
+        let last = fs::metadata(volume_part(&dest_base, expected_parts as u32))
+            .unwrap()
+            .len();
+        let before_last = fs::metadata(volume_part(&dest_base, (expected_parts - 1) as u32))
+            .unwrap()
+            .len();
+        assert_eq!(before_last, part);
+        assert_eq!(last, total - part * (expected_parts - 1) as u64);
+
+        // Recollement via .001 : listing et extraction de l'archive
+        // réassemblée (partie ouverte directement, comme l'UI le ferait).
+        {
+            let (path, guard) =
+                resolve_archive_path(&volume_part(&dest_base, 1)).unwrap();
+            let entries = list_archive_inner(&path, None).unwrap();
+            drop(guard);
+            assert!(entries.iter().any(|e| e.path == "sources/a.txt"));
+        }
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let (path, guard) = resolve_archive_path(&volume_part(&dest_base, 1)).unwrap();
+        let extracted = extract_archive_inner(None, None, "", &path, &out, None, None).unwrap();
+        drop(guard);
+        assert_eq!(extracted.files, 1);
+        assert!(out.join("sources/a.txt").is_file());
+
+        // Ouverture d'une partie autre que .001 : mêmes entrées.
+        {
+            let (path, guard) =
+                resolve_archive_path(&volume_part(&dest_base, 2)).unwrap();
+            let entries = list_archive_inner(&path, None).unwrap();
+            drop(guard);
+            assert!(entries.iter().any(|e| e.path == "sources/a.txt"));
+        }
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn decoupage_refuse_decraser_les_parties() {
+        let root = temp_root("split-exists");
+        let source = root.join("a.txt");
+        write(&source, "contenu A");
+        let dest_base = root.join("part");
+        split_archive_inner(None, None, "", &source, &dest_base, 100).unwrap();
+        let error =
+            split_archive_inner(None, None, "", &source, &dest_base, 100).unwrap_err();
+        assert!(error.to_string().contains("existe déjà"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn decoupage_annule_ne_laisse_pas_de_parties() {
+        let root = temp_root("split-cancel");
+        let source = root.join("a.txt");
+        write(&source, &"contenu plus long que la partie\n".repeat(10));
+        let dest_base = root.join("part");
+
+        let registry = OperationRegistry::default();
+        registry.begin("op-s");
+        registry.cancel("op-s");
+        let error = split_archive_inner(
+            None,
+            Some(&registry),
+            "op-s",
+            &source,
+            &dest_base,
+            32,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CommandError::Cancelled { .. }));
+        assert!(!volume_part(&dest_base, 1).exists());
+        assert!(!volume_part(&dest_base, 2).exists());
 
         fs::remove_dir_all(&root).unwrap();
     }

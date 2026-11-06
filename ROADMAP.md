@@ -49,7 +49,7 @@ _Objectif : présent là où l'utilisateur clique réellement._
 | --- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | 2.1 | **Menu contextuel Windows 11** | « Extraire ici / Extraire vers… / Ouvrir avec LibreRAR » via le nouveau modèle de menu (packaged app / sparse), sans élévation.        |
 | 2.2 | **Association d'extensions**   | .zip .7z .rar .jar ouvrables par double-clic ; deep links Tauri.                                                                       |
-| 2.3 | **Découpe de volumes moderne** | Découpe ZIP/7z en volumes paramétrables (taille libre), **recollement** à l'ouverture ; indispensable pour partages limités en taille. |
+| 2.3 | **Découpe de volumes moderne** — ✅ fait (découpe générique `.001`) | Découpe en volumes paramétrables (taille libre), **recollement** à l'ouverture ; indispensable pour partages limités en taille. |
 | 2.4 | **Auto-update silencieuse**    | Plugin Tauri updater signé ; notification non intrusive.                                                                               |
 | 2.5 | **Distribution moderne**       | `winget install librerar` ; package MSIX optionnel ; (pas de release sans validation manuelle `npm run tauri dev`).                    |
 
