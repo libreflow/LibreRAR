@@ -10,6 +10,7 @@ import type {
   OperationResult,
   Status,
 } from "./types";
+import type { RecentArchive } from "./lib/history";
 import { fileNameOf, formatBytes, formatDuration } from "./lib/format";
 import { sortEntries, implicitDirectories } from "./lib/entries";
 import {
@@ -29,6 +30,7 @@ import {
   type OperationProgress,
 } from "./lib/archiveApi";
 import { isTauri } from "./lib/platform";
+import { clearHistory, loadHistory, pushRecentArchive } from "./lib/history";
 import {
   createPasswordError,
   effectiveCreatePassword,
@@ -111,6 +113,8 @@ export default function App() {
   const [splitOpen, setSplitOpen] = useState(false);
   // Aperçu d'une entrée (texte/image), sans extraction.
   const [preview, setPreview] = useState<PreviewData | null>(null);
+  // Archives récemment ouvertes (stockage local).
+  const [history, setHistory] = useState<RecentArchive[]>(() => loadHistory());
   const [confirmClose, setConfirmClose] = useState(false);
   // Archive dont la lecture (ou l'extraction) a échoué : mot de passe
   // probablement requis. `pendingExtract` garde les paramètres d'une
@@ -246,6 +250,7 @@ export default function App() {
         const rawEntries = await listArchive(path, password);
         const entries = sortEntries(implicitDirectories(rawEntries));
         setArchive({ path, name, format, entries });
+        setHistory(pushRecentArchive(path));
         setPendingPath(null);
         setPendingExtract(null);
         if (announce) {
@@ -896,7 +901,37 @@ export default function App() {
             }
           />
         ) : (
-          <DropZone busy={busy} onPick={() => void chooseArchive()} />
+          <>
+            <DropZone busy={busy} onPick={() => void chooseArchive()} />
+            {history.length > 0 && (
+              <section className="history-panel" aria-label="Archives récentes">
+                <h2>Récentes</h2>
+                <ul>
+                  {history.map((recent) => (
+                    <li key={recent.path}>
+                      <button
+                        className="history-item"
+                        disabled={busy}
+                        title={recent.path}
+                        onClick={() => void openArchive(recent.path)}
+                      >
+                        {recent.name}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    clearHistory();
+                    setHistory([]);
+                  }}
+                >
+                  Effacer l'historique
+                </button>
+              </section>
+            )}
+          </>
         )}
       </main>
 

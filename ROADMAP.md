@@ -45,37 +45,37 @@ _Objectif : ne rien perdre en migrant depuis WinRAR._
 
 _Objectif : présent là où l'utilisateur clique réellement._
 
-| #   | Fonction                                                            | Critères d'acceptation                                                                                                          |
-| --- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| 2.1 | **Menu contextuel Windows 11**                                      | « Extraire ici / Extraire vers… / Ouvrir avec LibreRAR » via le nouveau modèle de menu (packaged app / sparse), sans élévation. |
-| 2.2 | **Association d'extensions**                                        | .zip .7z .rar .jar ouvrables par double-clic ; deep links Tauri.                                                                |
-| 2.3 | **Découpe de volumes moderne** — ✅ fait (découpe générique `.001`) | Découpe en volumes paramétrables (taille libre), **recollement** à l'ouverture ; indispensable pour partages limités en taille. |
-| 2.4 | **Auto-update silencieuse**                                         | Plugin Tauri updater signé ; notification non intrusive.                                                                        |
-| 2.5 | **Distribution moderne**                                            | `winget install librerar` ; package MSIX optionnel ; (pas de release sans validation manuelle `npm run tauri dev`).             |
+| #   | Fonction                                                            | Critères d'acceptation                                                                                                                                                   |
+| --- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2.1 | **Menu contextuel Windows 11** — ⏸ accord mainteneur requis         | « Extraire ici / Extraire vers… / Ouvrir avec LibreRAR » via le nouveau modèle de menu (packaged app / sparse), sans élévation. Nécessite `tauri.conf.json` + signature. |
+| 2.2 | **Association d'extensions** — ⏸ accord mainteneur requis           | .zip .7z .rar .jar ouvrables par double-clic ; deep links Tauri. Nécessite `tauri.conf.json`.                                                                            |
+| 2.3 | **Découpe de volumes moderne** — ✅ fait (découpe générique `.001`) | Découpe en volumes paramétrables (taille libre), **recollement** à l'ouverture ; indispensable pour partages limités en taille.                                          |
+| 2.4 | **Auto-update silencieuse** — ⏸ accord mainteneur requis            | Plugin Tauri updater signé ; notification non intrusive. Nécessite `tauri.conf.json` + clés de signature + serveur de mise à jour.                                       |
+| 2.5 | **Distribution moderne** — ⏸ compte éditeur requis                  | `winget install librerar` ; package MSIX optionnel ; (pas de release sans validation manuelle `npm run tauri dev`).                                                      |
 
 ## Phase 3 — Formats du monde réel 2026 (v1.1)
 
 _Objectif : couvrir ce que l'utilisateur télécharge et partage aujourd'hui._
 
-| #   | Fonction                                              | Critères d'acceptation                                                                                    |
-| --- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| 3.1 | **Lecture TAR / tar.gz / tar.xz / tar.zst** — ✅ fait | Le format des devs (dépôts, npm, releases GitHub) ; crates `tar` + décodeurs stream.                      |
-| 3.2 | **Création tar.gz / tar.zst** — ✅ fait               | Zstandard : standard de fait 2026 (rapide, moderne).                                                      |
-| 3.3 | **Aperçu avant extraction** — ✅ fait        | Ouvrir un fichier texte/image directement depuis l'archive, en lecture seule, sans extraction sur disque. |
-| 3.4 | **Sommes de contrôle** — ✅ fait (SHA-256 sur archive) | SHA-256/SHA-512 par entrée et sur archive ; export d'un `.sha256` (par entrée : suivi). |
+| #   | Fonction                                               | Critères d'acceptation                                                                                    |
+| --- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| 3.1 | **Lecture TAR / tar.gz / tar.xz / tar.zst** — ✅ fait  | Le format des devs (dépôts, npm, releases GitHub) ; crates `tar` + décodeurs stream.                      |
+| 3.2 | **Création tar.gz / tar.zst** — ✅ fait                | Zstandard : standard de fait 2026 (rapide, moderne).                                                      |
+| 3.3 | **Aperçu avant extraction** — ✅ fait                  | Ouvrir un fichier texte/image directement depuis l'archive, en lecture seule, sans extraction sur disque. |
+| 3.4 | **Sommes de contrôle** — ✅ fait (SHA-256 sur archive) | SHA-256/SHA-512 par entrée et sur archive ; export d'un `.sha256` (par entrée : suivi).                   |
 
 ## Phase 4 — L'avantage que WinRAR n'aura jamais (v1.2+)
 
 _Objectif : transformer « libre » en « meilleur »._
 
-| #   | Fonction                           | Critères d'acceptation                                                                         |
-| --- | ---------------------------------- | ---------------------------------------------------------------------------------------------- |
-| 4.1 | **Multiplateforme complet**        | Linux + macOS natifs (Tauri rend ceci quasi gratuit) ; WinRAR n'a que des ports mineurs.       |
-| 4.2 | **Extraction parallèle multicœur** | Extraction simultanée de plusieurs entrées ; durée affichée (déjà en place côté création).     |
-| 4.3 | **File d'opérations**              | Extraire/créer en arrière-plan, annulation propre, notification système à la fin.              |
-| 4.4 | **Historique récent + favoris**    | Rappel des archives récemment ouvertes ; chemins favoris.                                      |
-| 4.5 | **Audit sécurité continu**         | Fuzzing `safe_join`/extraction, CI durcie, budget CVE nul accepté sur les crates.              |
-| 4.6 | **Accessibilité & i18n**           | Audit accessibilité complet + ouverture à d'autres langues (structure i18n), l'anglais inclus. |
+| #   | Fonction                                               | Critères d'acceptation                                                                         |
+| --- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| 4.1 | **Multiplateforme complet**                            | Linux + macOS natifs (Tauri rend ceci quasi gratuit) ; WinRAR n'a que des ports mineurs.       |
+| 4.2 | **Extraction parallèle multicœur**                     | Extraction simultanée de plusieurs entrées ; durée affichée (déjà en place côté création).     |
+| 4.3 | **File d'opérations**                                  | Extraire/créer en arrière-plan, annulation propre, notification système à la fin.              |
+| 4.4 | **Historique récent + favoris** — ✅ fait (historique) | Rappel des archives récemment ouvertes ; chemins favoris (suivi).                              |
+| 4.5 | **Audit sécurité continu**                             | Fuzzing `safe_join`/extraction, CI durcie, budget CVE nul accepté sur les crates.              |
+| 4.6 | **Accessibilité & i18n**                               | Audit accessibilité complet + ouverture à d'autres langues (structure i18n), l'anglais inclus. |
 
 ---
 
