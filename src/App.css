@@ -712,6 +712,28 @@ input:focus {
   gap: 8px;
 }
 
+.create-format {
+  margin: 0;
+  padding: 0;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.create-format legend {
+  color: var(--text-dim);
+  font-size: 14px;
+  padding: 0;
+}
+
+.create-format-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+}
+
 .create-encryption-toggle {
   display: inline-flex;
   align-items: center;

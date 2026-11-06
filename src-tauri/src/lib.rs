@@ -1123,6 +1123,169 @@ fn create_zip_with_limit(
 }
 
 // ---------------------------------------------------------------------------
+// Création d'archives 7z
+// ---------------------------------------------------------------------------
+
+/// Parcourt les sources et collecte les entrées (dossiers inclus) avec leur
+/// nom d'archive — préfixé par le nom de la source, même convention que les
+/// ZIP créés.
+fn collect_sevenz_plan(sources: &[PathBuf]) -> CommandResult<Vec<(String, PathBuf)>> {
+    fn walk(prefix: &str, dir: &Path, plan: &mut Vec<(String, PathBuf)>) -> CommandResult<()> {
+        let entries = fs::read_dir(dir).map_err(CommandError::failed)?;
+        let mut children: Vec<(String, PathBuf)> = entries
+            .filter_map(|entry| {
+                entry.ok().map(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    (format!("{prefix}{name}"), entry.path())
+                })
+            })
+            .collect();
+        // Ordre déterministe d'une exécution à l'autre.
+        children.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, path) in children {
+            if path.is_dir() {
+                plan.push((name.clone(), path.clone()));
+                walk(&format!("{name}/"), &path, plan)?;
+            } else {
+                plan.push((name, path));
+            }
+        }
+        Ok(())
+    }
+
+    let mut plan = Vec::new();
+    for source in sources {
+        let name = source
+            .file_name()
+            .ok_or_else(|| {
+                CommandError::failed(format!("Chemin source invalide : {}", source.display()))
+            })?
+            .to_string_lossy()
+            .to_string();
+        plan.push((name.clone(), source.clone()));
+        if source.is_dir() {
+            walk(&format!("{name}/"), source, &mut plan)?;
+        }
+    }
+    Ok(plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_sevenz_inner(
+    app: Option<&AppHandle>,
+    registry: Option<&OperationRegistry>,
+    id: &str,
+    dest: &Path,
+    sources: &[PathBuf],
+    password: Option<&str>,
+) -> CommandResult<OperationResult> {
+    if sources.is_empty() {
+        return Err(CommandError::failed("Aucun fichier source fourni."));
+    }
+    if dest.exists() {
+        return Err(CommandError::failed(
+            "Le fichier de destination existe déjà.",
+        ));
+    }
+    if dest_inside_sources(dest, sources) {
+        return Err(CommandError::failed(
+            "La destination se trouve dans un dossier source : l'archive s'inclurait elle-même.",
+        ));
+    }
+    let ctx = OpContext {
+        app,
+        registry,
+        id,
+    };
+    let plan = collect_sevenz_plan(sources)?;
+    let total = plan.iter().filter(|(_, path)| !path.is_dir()).count() as u64;
+    let mut result = OperationResult {
+        files: 0,
+        bytes: 0,
+        elapsed_ms: 0,
+    };
+    let start = std::time::Instant::now();
+    let file = File::create(dest).map_err(CommandError::failed)?;
+    let mut writer = sevenz_rust::SevenZWriter::new(file).map_err(sevenz_err)?;
+    let outcome = (|| -> CommandResult<()> {
+        // Chiffrement optionnel : contenu AES-256 (LZMA2 derrière) et,
+        // puisque AES figure dans les méthodes, en-tête également chiffré
+        // (les noms de fichiers sont protégés).
+        if let Some(password) = password {
+            writer.set_content_methods(vec![
+                sevenz_rust::AesEncoderOptions::new(sevenz_rust::Password::from(password))
+                    .into(),
+                sevenz_rust::SevenZMethod::LZMA2.into(),
+            ]);
+        }
+        for (name, path) in &plan {
+            ctx.check()?;
+            let entry = sevenz_rust::SevenZArchiveEntry::from_path(path, name.clone());
+            if path.is_dir() {
+                writer
+                    .push_archive_entry::<&[u8]>(entry, None)
+                    .map_err(sevenz_err)?;
+            } else {
+                let file = File::open(path).map_err(CommandError::failed)?;
+                writer
+                    .push_archive_entry(entry, Some(file))
+                    .map_err(sevenz_err)?;
+                result.files += 1;
+                result.bytes += fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                ctx.progress(result.files, total, name);
+            }
+        }
+        Ok(())
+    })();
+    // `finish` consomme le writer : garanti exécuté (et le fichier fermé)
+    // avant le nettoyage éventuel.
+    let outcome = outcome.and_then(|_| {
+        writer
+            .finish()
+            .map_err(|e| CommandError::failed(e.to_string()))
+    });
+    if let Err(error) = outcome {
+        // Ne laisse pas d'archive partielle sur disque.
+        let _ = fs::remove_file(dest);
+        return Err(error);
+    }
+    result.elapsed_ms = start.elapsed().as_millis() as u64;
+    Ok(result)
+}
+
+#[tauri::command]
+async fn create_sevenz(
+    app: AppHandle,
+    registry: tauri::State<'_, Arc<OperationRegistry>>,
+    id: String,
+    dest: String,
+    sources: Vec<String>,
+    password: Option<String>,
+) -> CommandResult<OperationResult> {
+    let registry = registry.inner().clone();
+    registry.begin(&id);
+    // La compression est bloquante (IO) : exécutée hors du runtime async.
+    let task_registry = registry.clone();
+    let task_id = id.clone();
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let dest = PathBuf::from(&dest);
+        let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+        let password = normalize_password(&password);
+        create_sevenz_inner(
+            Some(&app),
+            Some(&task_registry),
+            &task_id,
+            &dest,
+            &sources,
+            password,
+        )
+    });
+    let result = task.await.map_err(CommandError::failed);
+    registry.end(&id);
+    result?
+}
+
+// ---------------------------------------------------------------------------
 // Point d'entrée Tauri
 // ---------------------------------------------------------------------------
 
@@ -1136,6 +1299,7 @@ pub fn run() {
             list_archive,
             extract_archive,
             create_zip,
+            create_sevenz,
             cancel_operation
         ])
         .run(tauri::generate_context!())
@@ -1584,6 +1748,114 @@ mod tests {
             fs::read_to_string(out2.join("a.txt")).unwrap(),
             "contenu secret"
         );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn creation_sevenz_roundtrip() {
+        let root = temp_root("7z-create");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        write(&source_dir.join("sous/b.txt"), "contenu B");
+        let archive = root.join("test.7z");
+
+        let created =
+            create_sevenz_inner(None, None, "", &archive, &[source_dir.clone()], None).unwrap();
+        assert_eq!(created.files, 2);
+
+        // Mêmes noms d'entrées que les ZIP créés (préfixe « sources/ »).
+        let entries = list_archive_inner(&archive, None).unwrap();
+        let names: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+        assert!(names.contains(&"sources/a.txt".to_string()));
+        assert!(names.contains(&"sources/sous/b.txt".to_string()));
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let extracted = extract(&archive, &out, None, None).unwrap();
+        assert_eq!(extracted.files, 2);
+        assert_eq!(
+            fs::read_to_string(out.join("sources/a.txt")).unwrap(),
+            "contenu A"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn creation_sevenz_chiffree() {
+        let root = temp_root("7z-create-crypt");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu secret");
+        let archive = root.join("secret.7z");
+        let password = "mot-de-passe-secret";
+
+        create_sevenz_inner(
+            None,
+            None,
+            "",
+            &archive,
+            &[source_dir.clone()],
+            Some(password),
+        )
+        .unwrap();
+
+        // L'en-tête est chiffré : le listing sans mot de passe échoue
+        // avec l'erreur typée (différence avec le ZIP AES).
+        let error = list_archive_inner(&archive, None)
+            .err()
+            .expect("le listing sans mot de passe doit échouer");
+        assert!(matches!(error, CommandError::PasswordRequired { .. }));
+
+        // Listing avec le bon mot de passe : réussit.
+        let entries = list_archive_inner(&archive, Some(password)).unwrap();
+        assert!(entries.iter().any(|e| e.path == "sources/a.txt"));
+
+        // Extraction : sans mot de passe et mauvais mot de passe échouent.
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        assert!(matches!(
+            extract(&archive, &out, None, None).unwrap_err(),
+            CommandError::PasswordRequired { .. }
+        ));
+        assert!(matches!(
+            extract(&archive, &out, Some("mauvais"), None).unwrap_err(),
+            CommandError::PasswordRequired { .. }
+        ));
+        assert!(!out.join("sources/a.txt").exists());
+
+        // Bon mot de passe : round-trip complet.
+        let extracted = extract(&archive, &out, Some(password), None).unwrap();
+        assert_eq!(extracted.files, 1);
+        assert_eq!(
+            fs::read_to_string(out.join("sources/a.txt")).unwrap(),
+            "contenu secret"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn creation_sevenz_annulee_ne_laisse_pas_darchive_partielle() {
+        let root = temp_root("7z-create-cancel");
+        let source_dir = root.join("sources");
+        write(&source_dir.join("a.txt"), "contenu A");
+        let archive = root.join("partiel.7z");
+
+        let registry = OperationRegistry::default();
+        registry.begin("op-3");
+        registry.cancel("op-3");
+        let error = create_sevenz_inner(
+            None,
+            Some(&registry),
+            "op-3",
+            &archive,
+            &[source_dir],
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CommandError::Cancelled { .. }));
+        assert!(!archive.exists());
 
         fs::remove_dir_all(&root).unwrap();
     }

@@ -80,6 +80,20 @@ export function createZip(
   return invoke<OperationResult>("create_zip", { id, dest, sources, password });
 }
 
+export function createSevenz(
+  id: string,
+  dest: string,
+  sources: string[],
+  password: string | null = null,
+): Promise<OperationResult> {
+  return invoke<OperationResult>("create_sevenz", {
+    id,
+    dest,
+    sources,
+    password,
+  });
+}
+
 /** Demande l'annulation de l'opération identifiée par `id`. */
 export function cancelOperation(id: string): Promise<void> {
   return invoke<void>("cancel_operation", { id });

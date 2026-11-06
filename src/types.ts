@@ -14,6 +14,9 @@ export interface OperationResult {
 
 export type ArchiveFormat = "zip" | "rar" | "sevenz";
 
+/** Formats proposés lors de la création d'une archive. */
+export type CreateFormat = "zip" | "sevenz";
+
 export type StatusKind = "info" | "success" | "error";
 
 export interface Status {

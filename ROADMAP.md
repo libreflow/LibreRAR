@@ -36,7 +36,7 @@ _Objectif : ne rien perdre en migrant depuis WinRAR._
 | #   | Fonction                                     | Critères d'acceptation                                                                                     |
 | --- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | 1.1 | **Mot de passe à la création ZIP** — ✅ fait | AES-256 obligatoire (jamais ZipCrypto, cassable) ; tests round-trip chiffré ; refus clear-text par défaut. |
-| 1.2 | **Création 7z** (LZMA2)                      | Via `sevenz-rust` ; choix niveau de compression ; chiffrement AES-256 ; tests round-trip.                  |
+| 1.2 | **Création 7z** (LZMA2) — ✅ fait            | Via `sevenz-rust` ; choix niveau de compression ; chiffrement AES-256 ; tests round-trip.                  |
 | 1.3 | **Test d'intégrité** (`Test archive`)        | Commande IPC `test_archive` ; 100% des entrées vérifiées (CRC/hash), rapport clair en français.            |
 | 1.4 | **Chiffrement fort à la lecture**            | ZIP AES + RAR + 7z AES-256 (✅ déjà présent — à couvrir de tests réels).                                   |
 | 1.5 | **Vue « détails de compression »**           | Ratio, taille économisée par entrée (donnée déjà fournie par le listing).                                  |

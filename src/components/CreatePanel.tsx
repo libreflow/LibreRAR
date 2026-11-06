@@ -1,9 +1,11 @@
 import { fileNameOf } from "../lib/format";
+import type { CreateFormat } from "../types";
 import { FileIcon, LoaderIcon } from "./Icons";
 
 interface CreatePanelProps {
   busy: boolean;
   sources: string[];
+  format: CreateFormat;
   encryptionEnabled: boolean;
   password: string;
   passwordConfirm: string;
@@ -12,14 +14,21 @@ interface CreatePanelProps {
   onCreate: () => void;
   onAddFiles: () => void;
   onAddDir: () => void;
+  onFormatChange: (format: CreateFormat) => void;
   onToggleEncryption: (enabled: boolean) => void;
   onPasswordChange: (password: string) => void;
   onPasswordConfirmChange: (confirm: string) => void;
 }
 
+const CREATE_FORMATS: { value: CreateFormat; label: string }[] = [
+  { value: "zip", label: "ZIP · Deflate, multi-cœur" },
+  { value: "sevenz", label: "7z · LZMA2, compression maximale" },
+];
+
 export default function CreatePanel({
   busy,
   sources,
+  format,
   encryptionEnabled,
   password,
   passwordConfirm,
@@ -28,16 +37,17 @@ export default function CreatePanel({
   onCreate,
   onAddFiles,
   onAddDir,
+  onFormatChange,
   onToggleEncryption,
   onPasswordChange,
   onPasswordConfirmChange,
 }: CreatePanelProps) {
   return (
     <section className="create-panel">
-      <h2>Créer une archive ZIP</h2>
+      <h2>Créer une archive</h2>
       <p>
-        {sources.length} élément(s) à compresser. Choisissez l'emplacement du
-        fichier .zip.
+        {sources.length} élément(s) à compresser. Choisissez le format puis
+        l'emplacement du fichier.
       </p>
       <ul className="create-list">
         {sources.map((source) => (
@@ -46,6 +56,22 @@ export default function CreatePanel({
           </li>
         ))}
       </ul>
+      <fieldset className="create-format">
+        <legend>Format</legend>
+        {CREATE_FORMATS.map(({ value, label }) => (
+          <label key={value} className="create-format-option">
+            <input
+              type="radio"
+              name="create-format"
+              value={value}
+              checked={format === value}
+              disabled={busy}
+              onChange={() => onFormatChange(value)}
+            />
+            {label}
+          </label>
+        ))}
+      </fieldset>
       <div className="create-encryption">
         <label className="create-encryption-toggle">
           <input

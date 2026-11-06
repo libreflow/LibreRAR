@@ -6,6 +6,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   ArchiveEntry,
   ArchiveFormat,
+  CreateFormat,
   OperationResult,
   Status,
 } from "./types";
@@ -14,6 +15,7 @@ import { sortEntries, implicitDirectories } from "./lib/entries";
 import {
   asAppError,
   cancelOperation,
+  createSevenz,
   createZip,
   detectFormat,
   extractArchive,
@@ -71,6 +73,8 @@ export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [creating, setCreating] = useState(false);
   const [sources, setSources] = useState<string[]>([]);
+  // Format de l'archive créée (ZIP par défaut, 7z disponible).
+  const [createFormat, setCreateFormat] = useState<CreateFormat>("zip");
   // Chiffrement de l'archive créée (AES-256) : activation + saisie.
   const [encryptionEnabled, setEncryptionEnabled] = useState(false);
   const [createPassword, setCreatePassword] = useState("");
@@ -331,12 +335,20 @@ export default function App() {
   );
 
   const handleCreate = useCallback(
-    async (dest: string, sources: string[], password: string | null) => {
+    async (
+      dest: string,
+      sources: string[],
+      password: string | null,
+      format: CreateFormat,
+    ) => {
       const id = beginOperation();
       setBusy(true);
       setStatus(null);
       try {
-        const result = await createZip(id, dest, sources, password);
+        const result =
+          format === "sevenz"
+            ? await createSevenz(id, dest, sources, password)
+            : await createZip(id, dest, sources, password);
         setStatus({
           kind: "success",
           message: `${result.files} fichier(s) · ${formatBytes(result.bytes)} compressé(s) en ${formatDuration(result.elapsedMs)} → ${dest}${
@@ -345,9 +357,9 @@ export default function App() {
         });
         setLastResult(result);
         setCreating(false);
-        // Ouverture silencieuse : le message de succès de la création doit
-        // rester visible (l'info de listing l'écraserait).
-        await openArchive(dest, null, false);
+        // Ouverture silencieuse avec le mot de passe éventuel : une 7z
+        // chiffrée a son en-tête protégé, le listing l'exige donc.
+        await openArchive(dest, password, false);
       } catch (error) {
         const appError = asAppError(error);
         if (appError.kind === "cancelled") {
@@ -385,7 +397,8 @@ export default function App() {
     if (Array.isArray(picked) && picked.length > 0) {
       setSources(picked);
       setCreating(true);
-      // Nouvelle session de création : saisie de mot de passe réinitialisée.
+      // Nouvelle session de création : saisie et format réinitialisés.
+      setCreateFormat("zip");
       setEncryptionEnabled(false);
       setCreatePassword("");
       setCreatePasswordConfirm("");
@@ -445,15 +458,18 @@ export default function App() {
         });
         return;
       }
-      const dest = await save({
-        filters: [{ name: "Archive ZIP", extensions: ["zip"] }],
-      });
+      const filters =
+        createFormat === "sevenz"
+          ? [{ name: "Archive 7z", extensions: ["7z"] }]
+          : [{ name: "Archive ZIP", extensions: ["zip"] }];
+      const dest = await save({ filters });
       if (typeof dest === "string" && dest.length > 0) {
-        await handleCreate(dest, sources, password);
+        await handleCreate(dest, sources, password, createFormat);
       }
     },
     [
       handleCreate,
+      createFormat,
       encryptionEnabled,
       createPassword,
       createPasswordConfirm,
@@ -632,6 +648,7 @@ export default function App() {
           <CreatePanel
             busy={busy}
             sources={sources}
+            format={createFormat}
             encryptionEnabled={encryptionEnabled}
             password={createPassword}
             passwordConfirm={createPasswordConfirm}
@@ -640,6 +657,7 @@ export default function App() {
             onCreate={() => void pickSavePath(sources)}
             onAddFiles={() => void addCreateSources(false)}
             onAddDir={() => void addCreateSources(true)}
+            onFormatChange={setCreateFormat}
             onToggleEncryption={setEncryptionEnabled}
             onPasswordChange={setCreatePassword}
             onPasswordConfirmChange={setCreatePasswordConfirm}

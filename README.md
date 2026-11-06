@@ -11,8 +11,9 @@ français.
 - **Ouvrir et explorer** : RAR (lecture), ZIP, JAR et 7z
 - **Extraire** : archive complète ou sélection d'entrées, avec mot de passe
   (ZipCrypto/AES pour ZIP, RAR, 7z AES-256)
-- **Créer** : archives ZIP (fichiers et dossiers, récursif, compression Deflate),
-  avec mot de passe optionnel (chiffrement AES-256 — jamais ZipCrypto)
+- **Créer** : archives ZIP (Deflate, compression multi-cœur) et 7z (LZMA2),
+  fichiers et dossiers récursifs, avec mot de passe optionnel (chiffrement
+  AES-256 — jamais ZipCrypto)
 - **Glisser-déposer** d'une archive sur la fenêtre pour l'ouvrir
 - **Sécurité** : refus des chemins malveillants (« zip-slip ») à l'extraction
 
@@ -75,7 +76,7 @@ Formats gérés par le backend :
 | ------- | ------- | -------------- | ----------------- | ------------- |
 | ZIP/JAR | ✅      | ✅ (sélective) | ✅                | `zip`         |
 | RAR     | ✅      | ✅ (sélective) | ❌ (propriétaire) | `unrar`       |
-| 7z      | ✅      | ✅ (sélective) | ❌                | `sevenz-rust` |
+| 7z      | ✅      | ✅ (sélective) | ✅ (LZMA2)        | `sevenz-rust` |
 
 ## Licence
 
